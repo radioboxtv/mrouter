@@ -1,0 +1,364 @@
+{
+  "lm_studio": {
+    "lms_bin": "~/.lmstudio/bin/lms",
+    "api_base": "http://localhost:1234/v1",
+    "models_root": "~/.lmstudio/models"
+  },
+  "providers": {
+    "aperture": {
+      "enabled": true,
+      "label": "Cloud gateway (any OpenAI-compatible endpoint with /v1/models pricing)",
+      "api_base": "https://your-gateway.example.com/v1",
+      "api_key": "",
+      "catalog_cache_seconds": 300,
+      "note": "Any OpenAI-compatible gateway whose /v1/models returns per-model `pricing` {input, input_cache_read, output} USD-per-token strings plus context_window_tokens. mrouter computes actual cost as usage x pricing. Point api_base at your endpoint; auth via api_key_env or api_key.",
+      "api_key_env": "APERTURE_API_KEY"
+    }
+  },
+  "proxy": {
+    "host": "127.0.0.1",
+    "port": 8730
+  },
+  "hardware": {
+    "total_ram_gb": 36,
+    "note": "Unified memory (Apple Silicon). Used for memory-fit scoring: models that spill to disk page out and get slow."
+  },
+  "routing": {
+    "sensitive_local_only": true,
+    "allow_cloud": {
+      "chat": true,
+      "coding": true,
+      "thinking": true,
+      "sensitive": false
+    },
+    "classifier_confidence_for_sensitive": 0.55,
+    "sensitive_probability_floor": 0.25,
+    "note": "sensitive is a HARD local-only filter, not a weight: cloud models are excluded before scoring. Other use cases multiplex across local + Aperture by score (capability, speed, cost). sensitive_probability_floor: in 'auto', any prompt whose sensitive probability reaches this floor is forced local, regardless of top label."
+  },
+  "jev": {
+    "enabled": true,
+    "endpoint": "https://api.typesafe.ai/v1/systemone",
+    "model": "jev-latest",
+    "api_key_env": "TYPESAFE_API_KEY",
+    "timeout_seconds": 5,
+    "note": "Jev by TypeSafe AI: System One classifier, POST /v1/systemone, $0.042/Mtok input, output free, ~70-500ms, calibrated probabilities. Optional: set TYPESAFE_API_KEY. Without a key, mrouter falls back to a local heuristic classifier at zero cost. setec_secret/setec_server are optional fields for setec-cli users; remove them if you don't use setec."
+  },
+  "learning": {
+    "enabled": true,
+    "log_file": "route_log.jsonl",
+    "learned_file": "learned.json",
+    "max_adjustment": 8.0,
+    "min_samples_for_auto_adj": 5,
+    "note": "Every routed request is logged (use case, model, latency, usage, actual cost, status). Explicit feedback (mrouter feedback / POST /v1/feedback) and observed success/latency adjust future scores by a bounded amount. Run: python3 -m mrouter learn"
+  },
+  "use_cases": {
+    "chat": {
+      "label": "General purpose chat",
+      "description": "Everyday assistant chat: fast, pleasant, good instruction following. Latency and cost matter; local is free.",
+      "weights": {
+        "speed": 0.25,
+        "capability_chat": 0.25,
+        "cost_efficiency": 0.25,
+        "multimodal": 0.1,
+        "context": 0.05,
+        "tool_use": 0.05,
+        "value": 0.05
+      }
+    },
+    "coding": {
+      "label": "Coding",
+      "description": "Code generation, refactoring, agentic tool loops. Capability first, then context/tool-use, with a real cost term.",
+      "weights": {
+        "capability_coding": 0.45,
+        "context": 0.15,
+        "cost_efficiency": 0.15,
+        "tool_use": 0.1,
+        "speed": 0.1,
+        "params_quality": 0.05
+      }
+    },
+    "sensitive": {
+      "label": "Local inference on sensitive data",
+      "description": "LOCAL ONLY (hard filter). Rank local models by capability, RAM residency (no disk spill), context and speed.",
+      "weights": {
+        "capability_avg": 0.3,
+        "mem_fit": 0.3,
+        "cost_efficiency": 0.1,
+        "context": 0.1,
+        "speed": 0.1,
+        "privacy": 0.1
+      }
+    },
+    "thinking": {
+      "label": "Research and thinking",
+      "description": "Long-form reasoning, analysis, research synthesis. Reasoning capability and long context first, cost-aware.",
+      "weights": {
+        "capability_thinking": 0.5,
+        "context": 0.15,
+        "cost_efficiency": 0.15,
+        "params_quality": 0.1,
+        "speed": 0.1
+      }
+    }
+  },
+  "family_kb": {
+    "local-qwen3.8": {
+      "match": [
+        "qwen3.8-27b",
+        "qwen3_5"
+      ],
+      "capability_coding": 9.2,
+      "capability_thinking": 9.5,
+      "capability_chat": 8.5,
+      "vision": true,
+      "notes": "Local Qwen3.8 27B: strong reasoning/coding, thinking mode, hybrid linear attention. $0."
+    },
+    "local-gemma-4": {
+      "match": [
+        "gemma-4-e4b",
+        "gemma4"
+      ],
+      "capability_coding": 6.5,
+      "capability_thinking": 6.5,
+      "capability_chat": 8.8,
+      "vision": true,
+      "notes": "Local Gemma 4 E4B: very fast, tight instruction following, vision+audio. $0."
+    },
+    "claude-opus": {
+      "match": [
+        "claude-opus"
+      ],
+      "capability_coding": 9.8,
+      "capability_thinking": 9.9,
+      "capability_chat": 9.6,
+      "speed_est": 55,
+      "vision": true,
+      "notes": "Claude Opus tier: frontier capability, premium price."
+    },
+    "claude-sonnet": {
+      "match": [
+        "claude-sonnet"
+      ],
+      "capability_coding": 9.5,
+      "capability_thinking": 9.4,
+      "capability_chat": 9.4,
+      "speed_est": 65,
+      "vision": true,
+      "notes": "Claude Sonnet tier: near-frontier, mid-premium price."
+    },
+    "claude-haiku": {
+      "match": [
+        "claude-haiku"
+      ],
+      "capability_coding": 8.0,
+      "capability_thinking": 7.8,
+      "capability_chat": 8.6,
+      "speed_est": 90,
+      "vision": true,
+      "notes": "Claude Haiku tier: fast and capable; check variant pricing (some are very cheap)."
+    },
+    "gpt-flagship": {
+      "match": [
+        "gpt-6-astra",
+        "gpt-5.6-sol",
+        "gpt-6.1-sol",
+        "gpt-6-sol"
+      ],
+      "capability_coding": 9.8,
+      "capability_thinking": 9.9,
+      "capability_chat": 9.6,
+      "speed_est": 60,
+      "vision": true,
+      "notes": "GPT flagship tier: frontier capability, premium price."
+    },
+    "gpt-value": {
+      "match": [
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-6-luna"
+      ],
+      "capability_coding": 8.6,
+      "capability_thinking": 8.4,
+      "capability_chat": 8.9,
+      "speed_est": 85,
+      "vision": true,
+      "notes": "GPT value tier (Terra/Luna): strong capability at low price."
+    },
+    "deepseek-v4-pro": {
+      "match": [
+        "deepseek-v4-pro",
+        "deepseek-ai/deepseek-v4-pro"
+      ],
+      "capability_coding": 9.4,
+      "capability_thinking": 9.6,
+      "capability_chat": 8.8,
+      "speed_est": 55,
+      "vision": false,
+      "notes": "DeepSeek V4 Pro: frontier-class reasoning/coding at a fraction of flagship price."
+    },
+    "deepseek-v4-flash": {
+      "match": [
+        "deepseek-v4-flash",
+        "deepseek-v4.1-flash"
+      ],
+      "capability_coding": 8.3,
+      "capability_thinking": 8.0,
+      "capability_chat": 8.2,
+      "speed_est": 92,
+      "vision": false,
+      "notes": "DeepSeek V4 Flash: very cheap, fast, capable. Strong value pick."
+    },
+    "deepseek-reasoner": {
+      "match": [
+        "deepseek-reasoner"
+      ],
+      "capability_coding": 7.5,
+      "capability_thinking": 9.0,
+      "capability_chat": 7.0,
+      "speed_est": 60,
+      "vision": false,
+      "notes": "DeepSeek Reasoner: cheap dedicated reasoning."
+    },
+    "deepseek-chat": {
+      "match": [
+        "deepseek-chat"
+      ],
+      "capability_coding": 8.0,
+      "capability_thinking": 7.5,
+      "capability_chat": 8.5,
+      "speed_est": 85,
+      "vision": false,
+      "notes": "DeepSeek V3 chat: cheap generalist."
+    },
+    "glm-flash": {
+      "match": [
+        "glm-5.3-flash",
+        "glm-5.3-fast"
+      ],
+      "capability_coding": 8.2,
+      "capability_thinking": 8.0,
+      "capability_chat": 8.4,
+      "speed_est": 92,
+      "vision": false,
+      "notes": "GLM Flash/Fast tier: cheap and quick."
+    },
+    "glm-5": {
+      "match": [
+        "glm-5.3",
+        "glm-5.2",
+        "zai-org/glm"
+      ],
+      "capability_coding": 9.0,
+      "capability_thinking": 9.2,
+      "capability_chat": 8.8,
+      "speed_est": 70,
+      "vision": false,
+      "notes": "GLM 5.x flagship: strong reasoning/coding, moderate price. Hermes default family."
+    },
+    "kimi": {
+      "match": [
+        "kimi-k3",
+        "kimi"
+      ],
+      "capability_coding": 9.3,
+      "capability_thinking": 9.3,
+      "capability_chat": 9.0,
+      "speed_est": 55,
+      "vision": true,
+      "notes": "Kimi K3: frontier-class, long context, premium price."
+    },
+    "grok": {
+      "match": [
+        "grok-4"
+      ],
+      "capability_coding": 9.2,
+      "capability_thinking": 9.2,
+      "capability_chat": 9.0,
+      "speed_est": 65,
+      "vision": true,
+      "notes": "Grok 4.x: frontier-class, mid-premium price."
+    },
+    "gemini-flash": {
+      "match": [
+        "gemini-3.7-flash",
+        "gemini-3.8-flash",
+        "gemini"
+      ],
+      "capability_coding": 8.5,
+      "capability_thinking": 8.3,
+      "capability_chat": 9.0,
+      "speed_est": 90,
+      "vision": true,
+      "notes": "Gemini Flash: fast, multimodal, mid-low price."
+    },
+    "qwen-max": {
+      "match": [
+        "qwen3.8-max"
+      ],
+      "capability_coding": 9.2,
+      "capability_thinking": 9.2,
+      "capability_chat": 8.9,
+      "speed_est": 65,
+      "vision": false,
+      "notes": "Qwen Max (cloud): flagship Qwen, premium price. Distinct from local Qwen3.8-27B."
+    },
+    "muse": {
+      "match": [
+        "muse-wonder"
+      ],
+      "capability_coding": 9.0,
+      "capability_thinking": 9.2,
+      "capability_chat": 9.2,
+      "speed_est": 65,
+      "vision": true,
+      "notes": "Meta Muse: frontier chat/reasoning, premium price. Hermes fallback model."
+    },
+    "mistral-large": {
+      "match": [
+        "mistral-large",
+        "pixtral-large"
+      ],
+      "capability_coding": 8.8,
+      "capability_thinking": 8.6,
+      "capability_chat": 8.8,
+      "speed_est": 70,
+      "vision": true,
+      "notes": "Mistral Large / Pixtral Large: strong, vision on Pixtral, low-mid price."
+    },
+    "codestral": {
+      "match": [
+        "codestral"
+      ],
+      "capability_coding": 8.8,
+      "capability_thinking": 7.0,
+      "capability_chat": 7.2,
+      "speed_est": 85,
+      "vision": false,
+      "notes": "Codestral: code-specialised, cheap."
+    },
+    "mistral-small": {
+      "match": [
+        "mistral-small",
+        "mistral-medium",
+        "ministral"
+      ],
+      "capability_coding": 7.2,
+      "capability_thinking": 7.0,
+      "capability_chat": 8.0,
+      "speed_est": 92,
+      "vision": false,
+      "notes": "Mistral small/ministral tier: very cheap, fast, lighter capability."
+    }
+  },
+  "default_family_scores": {
+    "capability_coding": 6.5,
+    "capability_thinking": 6.5,
+    "capability_chat": 7.0,
+    "speed_est": 70
+  },
+  "bench": {
+    "max_tokens": 24,
+    "prompt": "Reply with the single word: ready",
+    "max_age_hours": 168
+  }
+}

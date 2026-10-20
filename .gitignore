@@ -1,0 +1,11 @@
+# Machine-local state — never share these
+config.json
+aperture_cache.json
+bench_results.json
+learned.json
+route_log.jsonl
+mrouter.launchd.log
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
