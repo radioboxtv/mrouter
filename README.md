@@ -88,12 +88,14 @@ with per-model $/M pricing).
    `config.json` (modality tokens, hybrid-attention layout). Cloud models from
    your gateway's `GET /v1/models` — including the per-token `pricing` block
    when the gateway publishes one (Aperture-style gateways do; see below).
-2. **Classification** (`auto`): a [Jev](https://typesafe.ai) call (TypeSafe AI's
-   System One classifier — typed, calibrated probabilities, $0.042/Mtok input,
-   output free, ~70–500 ms) if `TYPESAFE_API_KEY` is set, else a deterministic
-   local keyword classifier at $0. Classifier probabilities are **blended**
-   across use-case rankings, and any prompt whose `sensitive` probability
-   crosses the floor is forced onto the local-only route.
+2. **Classification** (`auto`): the configured **decision model** — Baseten's
+   *mammoth-1* / *elephant-1* (System One API: typed, calibrated
+   probabilities) or TypeSafe's *Jev* (same API shape) — if its key is set;
+   else a deterministic local keyword classifier at $0. Classifier
+   probabilities are **blended** across use-case rankings, and any prompt
+   whose `sensitive` probability crosses the floor is forced onto the
+   local-only route. Provider chain via `decision.provider`:
+   `auto` (Baseten → Jev → local) | `baseten` | `jev` | `local`.
 3. **Scoring.** Each model gets feature scores — capability (curated family
    knowledge base), speed (measured for local, family estimate for cloud),
    context tier, multimodality, tool-use, RAM fit, `cost_efficiency`
@@ -112,8 +114,8 @@ with per-model $/M pricing).
 
 Everything tunable lives in `config.json` (not code). Copy
 `config.example.json`, then see **[CONFIG.md](CONFIG.md)** for the full
-reference — endpoints, weights, the family knowledge base, hardware, Jev,
-and learning bounds. Set `MROUTER_CONFIG=/path/to/config.json` to keep
+reference — endpoints, weights, the family knowledge base, hardware, decision
+models, and learning bounds. Set `MROUTER_CONFIG=/path/to/config.json` to keep
 configs out of the repo entirely. Secrets never live in the repo: keys come
 from environment variables (`APERTURE_API_KEY`, `TYPESAFE_API_KEY`) or, for
 setec-cli users, a secrets service.
@@ -180,7 +182,7 @@ python3 -m unittest discover -s tests -v
 ```
 
 55 hermetic tests: scoring, cost math, sensitive-invariant routing, classifier
-shapes (incl. mocked Jev), full proxy integration against in-process fake
+shapes (incl. mocked decision models), full proxy integration against in-process fake
 upstreams, config loading, learning bounds, and live-rankings behavior
 (slug matching, record mapping, modes, cache/fetch lifecycle).
 

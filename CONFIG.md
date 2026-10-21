@@ -98,22 +98,36 @@ automatically.
   probability reaches this value is forced onto the local-only route —
   independent of which label "won".
 
-## Jev classifier (optional)
+## Decision model (optional, Baseten or Jev)
 
 ```json
-"jev": {
+"decision": {
+  "provider": "auto",
+  "note": "Which categorizer 'auto' uses: auto (baseten key -> jev key -> local), baseten, jev, local."
+},
+"baseten": {
   "enabled": true,
-  "endpoint": "https://api.typesafe.ai/v1/systemone",
-  "model": "jev-latest",
-  "api_key_env": "TYPESAFE_API_KEY",
+  "endpoint": "https://inference.baseten.co/v1/systemone",
+  "model": "decision-models/baseten-mammoth-27b-latest",
+  "api_key_env": "BASETEN_API_KEY",
   "timeout_seconds": 5
 }
 ```
 
+Decision models return typed, calibrated probabilities instead of text. mrouter
+ships two providers and a deterministic local fallback (offline, free):
+
+- `decision.provider`: `auto` (default — Baseten key → Jev key → local),
+  `baseten`, `jev`, or `local` (pinned).
+- Baseten defaults to **mammoth-1** (27B; #1 of 208 on Jev Decision Index 0.4).
+  Set `baseten.model` to `decision-models/baseten-elephant-9b-latest` for the
+  cheaper 9B. Auth: `BASETEN_API_KEY` env (or `api_key_env` of your choosing).
+  No key/config → auto falls back to Jev/local.
+
 Without a key, `auto` uses the built-in deterministic classifier (offline,
-free). With `TYPESAFE_API_KEY`, prompts are classified by Jev and the
-calibrated probabilities are blended across use-case rankings; `classify_task`
-never raises — Jev failure falls back to local classification.
+free). With a key, prompts are classified by the decision model and the
+calibrated probabilities are blended across use-case rankings;
+`classify_task` never raises — provider failure falls back to local.
 
 ## Learning bounds
 
@@ -188,6 +202,7 @@ Live per-model intelligence/coding/agentic indices as a capability prior:
 |---|---|
 | `MROUTER_CONFIG` | Absolute path to an alternate config file |
 | `APERTURE_API_KEY` | Cloud gateway auth (name set by `providers.aperture.api_key_env`) |
+| `BASETEN_API_KEY` | Decision-model key (name set by `baseten.api_key_env`) |
 | `TYPESAFE_API_KEY` | Jev classifier key (name set by `jev.api_key_env`) |
 | `AA_API_KEY` | Artificial Analysis key (name set by `rankings.api_key_env`) |
 
