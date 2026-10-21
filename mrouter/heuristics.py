@@ -12,7 +12,8 @@ import math
 import os
 import time
 
-from . import learning, providers as providers_mod
+from . import learning, rankings
+from . import providers as providers_mod
 
 BENCH_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bench_results.json")
 
@@ -35,6 +36,51 @@ def _cap(model, config, kind):
                 val = config["default_family_scores"][f"capability_{kind}"]
             return float(val), fam, info
     return float(config["default_family_scores"][f"capability_{kind}"]), None, {}
+
+
+def _live_capability(model, config, kind, live_cache):
+    """Live-records capability for `kind`; live applies to cloud models only.
+    Returns ((value, source) | None). Local models keep curated scores:
+    benchmarks measure hosted/full-precision weights, not local quants."""
+    if model.get("is_local"):
+        return None
+    mode, records = live_cache
+    if mode not in ("live", "blend") or not records:
+        return None
+    rec = rankings.find_ranking(records, model)
+    if rec is None:
+        return None
+    scores = rankings._cached_scores(rec)
+    v = scores.get(f"capability_{kind}")
+    if v is None:
+        return None
+    return float(v), "artificial-analysis"
+
+
+def _resolve_capability(model, config, kind, live_cache):
+    """Final capability for `kind` -> (value_0_to_10, fam_key, fam_info, source).
+
+    Precedence per config `family_kb_mode` / `rankings.mode`:
+      curated -> hand-written KB only
+      live    -> AA scores win for cloud models (KB remains the vision/notes source)
+      blend   -> weighted average of KB and AA for cloud models that match both
+    Local models always use the KB; learned adjustments apply later, on top.
+    """
+    cur_val, fam, info = _cap(model, config, kind)
+    mode = live_cache[0]
+    if mode == "curated":
+        return cur_val, fam, info, "curated"
+    live = _live_capability(model, config, kind, live_cache)
+    if live is None:
+        return cur_val, fam, info, "curated"
+    live_val, source = live
+    if mode == "live":
+        return live_val, fam, info, source
+    if mode == "blend":
+        w = float((config.get("rankings", {}) or {}).get("blend_weight", 0.5))
+        w = max(0.0, min(1.0, w))
+        return cur_val * (1 - w) + live_val * w, fam, info, "blend"
+    return cur_val, fam, info, "curated"
 
 
 # ---------------------------------------------------------------- feature scores
@@ -156,10 +202,11 @@ def load_bench():
 
 # ---------------------------------------------------------------- scoring engine
 
-def _component_scores(model, fleet, config, bench):
-    chat_cap, fam, fam_info = _cap(model, config, "chat")
-    code_cap, _, _ = _cap(model, config, "coding")
-    think_cap, _, _ = _cap(model, config, "thinking")
+def _component_scores(model, fleet, config, bench, live_cache):
+    chat_cap, fam, fam_info, chat_src = _resolve_capability(model, config, "chat", live_cache)
+    code_cap, _, _, code_src = _resolve_capability(model, config, "coding", live_cache)
+    think_cap, _, _, think_src = _resolve_capability(model, config, "thinking", live_cache)
+    source = next((s for s in (chat_src, code_src, think_src) if s != "curated"), "curated")
     notes = (config.get("family_kb", {}).get(fam, {}) or {}).get("notes", "") if fam else ""
     est_cost = providers_mod.estimate_cost_usd(model, REF_INPUT_TOKENS, REF_OUTPUT_TOKENS, REF_CACHED_TOKENS)
     comps = {
@@ -177,7 +224,7 @@ def _component_scores(model, fleet, config, bench):
         "value": _value_score(model, config),
         "privacy": _privacy_score(model),
     }
-    return comps, notes, est_cost
+    return comps, notes, est_cost, source
 
 
 def eligible_models(models, config, use_case):
@@ -191,16 +238,24 @@ def eligible_models(models, config, use_case):
     return list(models)
 
 
-def score_fleet(models, config, bench=None, learned=None):
-    """Return {use_case: {label, description, models:[ranked...]}}."""
+def score_fleet(models, config, bench=None, learned=None, live_records=None):
+    """Return {use_case: {label, description, models:[ranked...]}}.
+
+    live_records: optional raw ranking records (Artificial Analysis shape).
+    Resolved capabilities honor config `rankings.mode` (curated|live|blend).
+    """
     bench = bench if bench is not None else load_bench()
     learned = learned if learned is not None else learning.load_learned(config)
+    if live_records is None:
+        live_records = rankings.load_rankings(config)
+    mode = (config.get("rankings", {}) or {}).get("mode", "curated")
+    live_cache = (mode, live_records)
     result = {}
     for uc, uc_cfg in config["use_cases"].items():
         pool = eligible_models(models, config, uc)
         ranked = []
         for m in pool:
-            comps, notes, est_cost = _component_scores(m, models, config, bench)
+            comps, notes, est_cost, cap_source = _component_scores(m, models, config, bench, live_cache)
             weights = uc_cfg["weights"]
             base = sum(comps[k] * w for k, w in weights.items() if k in comps)
             adj = learning.adjustment_for(learned, uc, m["key"])
@@ -212,6 +267,7 @@ def score_fleet(models, config, bench=None, learned=None):
                 "is_local": bool(m.get("is_local")), "display_name": m["display_name"],
                 "score": score, "base_score": round(base, 1), "learned_adj": adj,
                 "components": comps, "reason": contrib, "notes": notes,
+                "capability_source": cap_source,
                 "est_cost_usd": round(est_cost, 6),
                 "cost_input_per_m": round((m.get("cost_input_per_token") or 0) * 1e6, 4),
                 "cost_output_per_m": round((m.get("cost_output_per_token") or 0) * 1e6, 4),

@@ -15,6 +15,7 @@ come from environment variables.
 | `routing` | Hard eligibility rules (local-only, cloud allowlist, privacy floor) |
 | `jev` | Optional Jev (TypeSafe AI) classifier endpoint/auth |
 | `learning` | Feedback & outcome logging, adjustment bounds |
+| `rankings` | Optional live rankings prior (Artificial Analysis): mode, key, cache TTL |
 | `use_cases` | Per-use-case weight blends — the main tuning surface |
 | `family_kb` | Curated capability knowledge base, matched by model name |
 | `default_family_scores` | Scores for models that match no family_kb entry |
@@ -150,6 +151,37 @@ fully editable — tune to your taste.
 }
 ```
 
+## Live rankings (optional, Artificial Analysis)
+
+```json
+"rankings": {
+  "enabled": false,
+  "mode": "curated",
+  "blend_weight": 0.5,
+  "api_key_env": "AA_API_KEY",
+  "endpoint": "https://artificialanalysis.ai/api/v2/language/models/free",
+  "cache_seconds": 86400
+}
+```
+
+Live per-model intelligence/coding/agentic indices as a capability prior:
+
+- **`mode`**: `curated` (default — hand-written `family_kb` only) | `live`
+  (AA indices replace curated capabilities for **cloud** models) | `blend`
+  (weighted average; `blend_weight` is the AA share, default 0.5).
+- Cloud models only: local models always keep curated + bench-measured
+  scores — public benchmarks measure hosted full-precision weights, not your
+  local quants.
+- Cache-first: a fresh `aa_cache.json` (TTL `cache_seconds`, 24h default) is
+  served with no key and no network. Missing/stale cache triggers one fetch
+  when `AA_API_KEY` is set; on failure the stale cache is served. No key and
+  no cache → routing silently degrades to `curated`.
+- Key resolution: `api_key_env` first (via `AA_API_KEY` by default), then a
+  static `api_key`. Free-tier AA keys work — the `/free` endpoint includes
+  the headline indices and median performance.
+- The curated KB remains the vision/notes source in every mode; learned
+  adjustments (±8) apply on top of whatever capability prior was used.
+
 ## Environment variables
 
 | Var | Purpose |
@@ -157,6 +189,7 @@ fully editable — tune to your taste.
 | `MROUTER_CONFIG` | Absolute path to an alternate config file |
 | `APERTURE_API_KEY` | Cloud gateway auth (name set by `providers.aperture.api_key_env`) |
 | `TYPESAFE_API_KEY` | Jev classifier key (name set by `jev.api_key_env`) |
+| `AA_API_KEY` | Artificial Analysis key (name set by `rankings.api_key_env`) |
 
-Machine-local files (`config.json`, `aperture_cache.json`, `bench_results.json`,
-`learned.json`, `route_log.jsonl`) are gitignored by default.
+Machine-local files (`config.json`, `aperture_cache.json`, `aa_cache.json`,
+`bench_results.json`, `learned.json`, `route_log.jsonl`) are gitignored by default.

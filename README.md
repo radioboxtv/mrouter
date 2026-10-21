@@ -162,15 +162,27 @@ Studio's server if down) in a launchd agent with `KeepAlive`.
   opinionated but transparent, editable in one place, and improved by
   learning over time.
 
+## Live rankings prior (optional, Artificial Analysis)
+
+Public benchmarks can replace or augment the curated `family_kb` for **cloud**
+models. Set `rankings.enabled: true` and a mode: `curated` (default),
+`live` (AA intelligence/coding/agentic indices win), or `blend` (weighted
+average, `blend_weight` = AA share). Local models always keep curated +
+bench-measured scores — public benchmarks measure hosted full-precision
+weights, not local quants. Cache-first (24h `aa_cache.json`), needs a free
+`AA_API_KEY` only to refresh; key-less or offline it degrades silently to
+curated. See [CONFIG.md](CONFIG.md).
+
 ## Tests
 
 ```bash
 python3 -m unittest discover -s tests -v
 ```
 
-34 hermetic tests: scoring, cost math, sensitive-invariant routing, classifier
+55 hermetic tests: scoring, cost math, sensitive-invariant routing, classifier
 shapes (incl. mocked Jev), full proxy integration against in-process fake
-upstreams, config loading, and learning bounds.
+upstreams, config loading, learning bounds, and live-rankings behavior
+(slug matching, record mapping, modes, cache/fetch lifecycle).
 
 ## License
 
