@@ -61,14 +61,58 @@ def _local_classify(text):
     }
 
 
+def _setec_bin(block_cfg):
+    """Resolve the setec CLI: config override -> PATH -> common install dirs.
+    Needed because daemons (launchd) run with a bare PATH."""
+    import shutil
+    candidates = [
+        block_cfg.get("setec_bin"),
+        shutil.which("setec"),
+        os.path.expanduser("~/.local/bin/setec"),
+        os.path.expanduser("~/.local/share/mise/shims/setec"),
+    ]
+    for c in candidates:
+        if c and os.path.isfile(c) and os.access(c, os.X_OK):
+            return c
+    return None
+
+
+def _key_from_block(block_cfg):
+    """Decision-provider API key: env var -> static api_key -> setec secret."""
+    env_var = block_cfg.get("api_key_env")
+    if env_var:
+        val = os.environ.get(env_var)
+        if val:
+            return val.strip()
+    static = block_cfg.get("api_key")
+    if static:
+        return static
+    secret = block_cfg.get("setec_secret")
+    if secret:
+        binary = _setec_bin(block_cfg)
+        if not binary:
+            return None
+        env = dict(os.environ)
+        server = block_cfg.get("setec_server")
+        if server:
+            env["SETEC_SERVER"] = server
+        try:
+            out = subprocess.run([binary, "get", secret], capture_output=True,
+                                 text=True, timeout=10, env=env)
+            if out.returncode == 0 and out.stdout.strip():
+                return out.stdout.strip()
+        except Exception:
+            pass
+    return None
+
+
 def _attempt_baseten(text, config):
     """Run _baseten_classify if a Baseten key is configured; None otherwise.
     Errors are swallowed (logged) -> None so callers can fall back."""
     bcfg = config.get("baseten", {}) or {}
     if not bcfg.get("enabled", False):
         return None
-    env_var = bcfg.get("api_key_env", "BASETEN_API_KEY")
-    key = os.environ.get(env_var) if env_var else None
+    key = _key_from_block(bcfg)
     if not key:
         return None
     try:
@@ -142,24 +186,7 @@ def _baseten_classify(text, config, key):
 
 
 def _get_typesafe_key(config):
-    jcfg = config.get("jev", {}) or {}
-    env_var = jcfg.get("api_key_env", "TYPESAFE_API_KEY")
-    key = os.environ.get(env_var)
-    if key:
-        return key.strip()
-    secret = jcfg.get("setec_secret")
-    if secret:
-        env = dict(os.environ)
-        server = jcfg.get("setec_server")
-        if server:
-            env["SETEC_SERVER"] = server
-        try:
-            out = subprocess.run(["setec", "get", secret], capture_output=True, text=True, timeout=10, env=env)
-            if out.returncode == 0 and out.stdout.strip():
-                return out.stdout.strip()
-        except Exception:
-            pass
-    return None
+    return _key_from_block(config.get("jev", {}) or {})
 
 
 def _jev_classify(text, config, key):

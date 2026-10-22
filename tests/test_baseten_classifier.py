@@ -233,5 +233,119 @@ class TestProviderSelection(fx.ConfigIsolatedTestCase):
         self.assertEqual(r["source"], "local-heuristic")
 
 
+class TestBasetenKeyResolution(fx.ConfigIsolatedTestCase):
+    """Slice 3: baseten key may come from setec, not just env."""
+
+    def setUp(self):
+        super().setUp()
+        from mrouter import categorize
+        self.categorize = categorize
+        os.environ.pop("BASETEN_API_KEY", None)
+
+    def test_setec_secret_resolves_key_without_env(self):
+        cfg = self.make_config()
+        cfg["baseten"] = {
+            "enabled": True,
+            "api_key_env": "BASETEN_API_KEY",
+            "setec_secret": "kai/baseten/keys/mammoth-1",
+            "setec_server": "https://secrets.example.ts.net",
+        }
+        seen = {}
+
+        class FakeProc:
+            returncode = 0
+            stdout = "setec-fetched-key\n"
+
+        def fake_run(cmd, **kw):
+            seen["cmd"] = cmd
+            seen["env"] = kw.get("env") or {}
+            return FakeProc()
+
+        def fake_classify(text, config, key):
+            seen["key"] = key
+            return {"probs": {}, "top": "coding", "confidence": 0.9,
+                    "source": "baseten", "model": "m"}
+
+        cat = self.categorize
+        orig_run, orig_classify = cat.subprocess.run, cat._baseten_classify
+        cat.subprocess.run = fake_run
+        cat._baseten_classify = fake_classify
+        try:
+            r = cat._attempt_baseten("x", cfg)
+        finally:
+            cat.subprocess.run = orig_run
+            cat._baseten_classify = orig_classify
+        self.assertEqual(seen["cmd"][1:], ["get", "kai/baseten/keys/mammoth-1"])
+        self.assertTrue(seen["cmd"][0].endswith("setec"))
+        self.assertEqual(seen["env"].get("SETEC_SERVER"), "https://secrets.example.ts.net")
+        self.assertEqual(seen["key"], "setec-fetched-key")
+        self.assertEqual(r["source"], "baseten")
+
+    def test_setec_failure_falls_back_to_local(self):
+        cfg = self.make_config()
+        cfg["baseten"] = {
+            "enabled": True,
+            "api_key_env": "BASETEN_API_KEY",
+            "setec_secret": "kai/baseten/keys/mammoth-1",
+        }
+
+        class FakeProc:
+            returncode = 1
+            stdout = ""
+
+        self.categorize.subprocess.run = lambda *a, **k: FakeProc()
+        r = self.categorize.classify_task("hello there", cfg)
+        self.assertEqual(r["source"], "local-heuristic")
+
+
+class TestSetecBinaryResolution(fx.ConfigIsolatedTestCase):
+    """Slice 4: setec must resolve even when not on PATH (launchd context)."""
+
+    def setUp(self):
+        super().setUp()
+        from mrouter import categorize
+        self.categorize = categorize
+        self._orig_subprocess_run = categorize.subprocess.run
+        self._orig_which = categorize.__dict__.get("_setec_bin")
+        os.environ.pop("BASETEN_API_KEY", None)
+
+    def test_setec_bin_override_uses_that_binary(self):
+        import stat
+        fake = os.path.join(self.tmp, "fake-setec")
+        with open(fake, "w") as f:
+            f.write("#!/bin/bash\necho resolved-key\n")
+        os.chmod(fake, stat.S_IRWXU)
+        seen = {}
+
+        class FakeProc:
+            returncode = 0
+            stdout = "resolved-key\n"
+
+        def fake_run(cmd, **kw):
+            seen["cmd"] = cmd
+            return FakeProc()
+
+        self.categorize.subprocess.run = fake_run
+        try:
+            cfg_block = {
+                "api_key_env": "BASETEN_API_KEY",
+                "setec_secret": "kai/baseten/keys/mammoth-1",
+                "setec_bin": fake,
+            }
+            result = self.categorize._key_from_block(cfg_block)
+        finally:
+            self.categorize.subprocess.run = self._orig_subprocess_run
+        self.assertEqual(seen["cmd"][0], fake)
+        self.assertEqual(result, "resolved-key")
+
+    def test_missing_binary_everywhere_returns_none(self):
+        cfg_block = {
+            "api_key_env": "BASETEN_API_KEY",
+            "setec_secret": "some/secret",
+            "setec_bin": "/nonexistent/setec-path-xyz",
+        }
+        self.assertIsNone(self.categorize._key_from_block(cfg_block))
+
+
 if __name__ == "__main__":
     unittest.main()
