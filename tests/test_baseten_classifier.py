@@ -268,13 +268,17 @@ class TestBasetenKeyResolution(fx.ConfigIsolatedTestCase):
 
         cat = self.categorize
         orig_run, orig_classify = cat.subprocess.run, cat._baseten_classify
+        orig_bin = cat._setec_bin
         cat.subprocess.run = fake_run
         cat._baseten_classify = fake_classify
+        # Hermetic on any host: pretend a setec binary exists regardless of the runner.
+        cat._setec_bin = lambda block_cfg: "/usr/bin/setec"
         try:
             r = cat._attempt_baseten("x", cfg)
         finally:
             cat.subprocess.run = orig_run
             cat._baseten_classify = orig_classify
+            cat._setec_bin = orig_bin
         self.assertEqual(seen["cmd"][1:], ["get", "kai/baseten/keys/mammoth-1"])
         self.assertTrue(seen["cmd"][0].endswith("setec"))
         self.assertEqual(seen["env"].get("SETEC_SERVER"), "https://secrets.example.ts.net")
