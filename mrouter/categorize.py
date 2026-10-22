@@ -61,25 +61,132 @@ def _local_classify(text):
     }
 
 
-def _get_typesafe_key(config):
-    jcfg = config.get("jev", {}) or {}
-    env_var = jcfg.get("api_key_env", "TYPESAFE_API_KEY")
-    key = os.environ.get(env_var)
-    if key:
-        return key.strip()
-    secret = jcfg.get("setec_secret")
+def _setec_bin(block_cfg):
+    """Resolve the setec CLI: config override -> PATH -> common install dirs.
+    Needed because daemons (launchd) run with a bare PATH."""
+    import shutil
+    candidates = [
+        block_cfg.get("setec_bin"),
+        shutil.which("setec"),
+        os.path.expanduser("~/.local/bin/setec"),
+        os.path.expanduser("~/.local/share/mise/shims/setec"),
+    ]
+    for c in candidates:
+        if c and os.path.isfile(c) and os.access(c, os.X_OK):
+            return c
+    return None
+
+
+def _key_from_block(block_cfg):
+    """Decision-provider API key: env var -> static api_key -> setec secret."""
+    env_var = block_cfg.get("api_key_env")
+    if env_var:
+        val = os.environ.get(env_var)
+        if val:
+            return val.strip()
+    static = block_cfg.get("api_key")
+    if static:
+        return static
+    secret = block_cfg.get("setec_secret")
     if secret:
+        binary = _setec_bin(block_cfg)
+        if not binary:
+            return None
         env = dict(os.environ)
-        server = jcfg.get("setec_server")
+        server = block_cfg.get("setec_server")
         if server:
             env["SETEC_SERVER"] = server
         try:
-            out = subprocess.run(["setec", "get", secret], capture_output=True, text=True, timeout=10, env=env)
+            out = subprocess.run([binary, "get", secret], capture_output=True,
+                                 text=True, timeout=10, env=env)
             if out.returncode == 0 and out.stdout.strip():
                 return out.stdout.strip()
         except Exception:
             pass
     return None
+
+
+def _attempt_baseten(text, config):
+    """Run _baseten_classify if a Baseten key is configured; None otherwise.
+    Errors are swallowed (logged) -> None so callers can fall back."""
+    bcfg = config.get("baseten", {}) or {}
+    if not bcfg.get("enabled", False):
+        return None
+    key = _key_from_block(bcfg)
+    if not key:
+        return None
+    try:
+        return _baseten_classify(text, config, key)
+    except Exception as e:
+        print(f"[mrouter] Baseten classify failed ({type(e).__name__}); "
+              "falling back", flush=True)
+        return None
+
+
+def _baseten_classify(text, config, key):
+    """Classify via Baseten decision models (elephant-1 / mammoth-1).
+
+    System One API: POST {endpoint} with {model, state, questions{use_case:
+    {type:'choice', instructions, criteria:{uc: description}}}}. Typed answer:
+    answers.use_case = {choice, probabilities, confidence}.
+    """
+    bcfg = config.get("baseten", {}) or {}
+    model_id = bcfg.get("model", "decision-models/baseten-mammoth-27b-latest")
+    endpoint = bcfg.get("endpoint", "https://inference.baseten.co/v1/systemone")
+    criteria = {
+        "chat": "General-purpose conversation, questions, and everyday assistance.",
+        "coding": "Writing, debugging, reviewing, or explaining source code and technical implementation.",
+        "sensitive": "Confidential, private, personal, regulated, or proprietary content that must remain local.",
+        "thinking": "Deep reasoning, planning, research, analysis, comparison, or long-form synthesis.",
+    }
+    body = {
+        "model": model_id,
+        "state": (text or "")[:8000],
+        "questions": {
+            "use_case": {
+                "type": "choice",
+                "instructions": (
+                    "Classify this request for LLM routing. "
+                    "Choose the single best use case."
+                ),
+                "criteria": criteria,
+            }
+        },
+    }
+    req = urllib.request.Request(
+        endpoint,
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=float(bcfg.get("timeout_seconds", 5))) as r:
+        data = json.loads(r.read().decode())
+
+    ans = (data.get("answers") or {}).get("use_case")
+    if not isinstance(ans, dict):
+        return None
+    probs = ans.get("probabilities") or {}
+    top = ans.get("choice") or ans.get("value") or ans.get("label")
+    if top not in USE_CASES:
+        if probs:
+            top = max(probs, key=lambda k: probs[k] if k in USE_CASES else -1)
+        else:
+            return None
+    if top not in USE_CASES:
+        return None
+    probs = {k: float((probs or {}).get(k, 0.0)) for k in USE_CASES}
+    total = sum(probs.values()) or 1.0
+    probs = {k: round(v / total, 4) for k, v in probs.items()}
+    conf = ans.get("confidence")
+    conf = probs[top] if conf is None else float(conf)
+    return {
+        "probs": probs, "top": top, "confidence": conf,
+        "source": "baseten", "model": data.get("model") or model_id,
+    }
+
+
+def _get_typesafe_key(config):
+    return _key_from_block(config.get("jev", {}) or {})
 
 
 def _jev_classify(text, config, key):
@@ -140,17 +247,35 @@ def _jev_classify(text, config, key):
 
 
 def classify_task(text, config):
-    """Return {probs, top, confidence, source, model}. Never raises."""
-    cfg = config.get("jev", {}) or {}
-    if cfg.get("enabled", True):
-        key = _get_typesafe_key(config)
-        if key:
-            try:
-                result = _jev_classify(text, config, key)
-                if result:
-                    return result
-            except Exception as e:
-                print(f"[mrouter] Jev classify failed ({type(e).__name__}); using local fallback", flush=True)
+    """Return {probs, top, confidence, source, model}. Never raises.
+
+    Provider selection via config `decision.provider`:
+      auto (default) -> baseten key? then jev key? then local
+      baseten | jev | local -> pinned
+    """
+    decision = config.get("decision", {}) or {}
+    provider = decision.get("provider", "auto")
+    if provider == "local":
+        return _local_classify(text)
+    if provider in ("baseten", "auto"):
+        res = _attempt_baseten(text, config)
+        if res is not None:
+            return res
+        if provider == "baseten":
+            return _local_classify(text)
+    if provider in ("jev", "auto"):
+        jcfg = config.get("jev", {}) or {}
+        if jcfg.get("enabled", True):
+            key = _get_typesafe_key(config)
+            if key:
+                try:
+                    result = _jev_classify(text, config, key)
+                    if result:
+                        return result
+                except Exception as e:
+                    print(f"[mrouter] Jev classify failed ({type(e).__name__}); using local fallback", flush=True)
+        if provider == "jev":
+            return _local_classify(text)
     return _local_classify(text)
 
 

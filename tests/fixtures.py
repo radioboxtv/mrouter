@@ -83,6 +83,11 @@ class ConfigIsolatedTestCase(unittest.TestCase):
 
     def make_config(self):
         cfg = copy.deepcopy(discovery.load_config())
+        # Hermeticity: strip real setec resolution so tests never hit the
+        # user's actual secrets server through inherited machine configs.
+        for block in ("jev", "baseten"):
+            (cfg.get(block) or {}).pop("setec_secret", None)
+            (cfg.get(block) or {}).pop("setec_server", None)
         return cfg
 
     def tearDown(self):

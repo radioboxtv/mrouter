@@ -369,5 +369,27 @@
     "endpoint": "https://artificialanalysis.ai/api/v2/language/models/free",
     "cache_seconds": 86400,
     "note": "Optional live capability prior from Artificial Analysis. mode: curated | live | blend. Applies to cloud models only; local models keep curated + measured scores. Cache-first; degrades to curated when no key/offline."
+  },
+  "baseten": {
+    "enabled": true,
+    "endpoint": "https://inference.baseten.co/v1/systemone",
+    "model": "decision-models/baseten-mammoth-27b-latest",
+    "api_key_env": "BASETEN_API_KEY",
+    "timeout_seconds": 5,
+    "note": "Baseten decision models: elephant-1 (9B, fast) and mammoth-1 (27B, #1 of 208 on Jev Decision Index 0.4). System One API \u2014 same typed-answers shape as Jev, options sent as a named criteria map. Auth via BASETEN_API_KEY. When both are configured, decision.provider=auto prefers Baseten.",
+    "candidates": [
+      {
+        "model": "decision-models/baseten-mammoth-27b-latest",
+        "label": "Mammoth 27B (accuracy)"
+      },
+      {
+        "model": "decision-models/baseten-elephant-9b-latest",
+        "label": "Elephant 9B (speed/cost)"
+      }
+    ]
+  },
+  "decision": {
+    "provider": "auto",
+    "note": "Which categorizer 'auto' uses: auto (baseten key -> jev key -> local), baseten, jev, local."
   }
 }
