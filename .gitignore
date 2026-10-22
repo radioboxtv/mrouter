@@ -5,6 +5,7 @@ bench_results.json
 learned.json
 route_log.jsonl
 mrouter.launchd.log
+aa_cache.json
 __pycache__/
 *.pyc
 .venv/

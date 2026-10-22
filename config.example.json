@@ -360,5 +360,14 @@
     "max_tokens": 24,
     "prompt": "Reply with the single word: ready",
     "max_age_hours": 168
+  },
+  "rankings": {
+    "enabled": false,
+    "mode": "curated",
+    "blend_weight": 0.5,
+    "api_key_env": "AA_API_KEY",
+    "endpoint": "https://artificialanalysis.ai/api/v2/language/models/free",
+    "cache_seconds": 86400,
+    "note": "Optional live capability prior from Artificial Analysis. mode: curated | live | blend. Applies to cloud models only; local models keep curated + measured scores. Cache-first; degrades to curated when no key/offline."
   }
 }
