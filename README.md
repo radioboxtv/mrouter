@@ -264,12 +264,22 @@ audit/learning log). It powers two surfaces over a configurable time window
   reliability table, and a fuller per-model breakdown. No extra dependency.
 
 `GET /v1/metrics?window=1h|24h|<seconds>` and the cheap-poll
-`GET /v1/metrics/live` back both surfaces. Local models' speed score in
-routing also prefers real p90 tokens/sec from this store over the synthetic
-micro-bench once enough live samples exist (`metrics.live_speed_min_samples`,
-default 5) — live traffic, not just a 24-token bench prompt, feeds routing
-decisions. See [CONFIG.md](CONFIG.md#metrics-tray-app--dashboard) for every
-knob (retention, poll interval, window choices).
+`GET /v1/metrics/live` back both surfaces.
+
+**Real-world TTFT and tokens/min feed model selection, not just the
+dashboard.** Routing's `speed` (throughput) and `ttft` (latency) components
+prefer real p90 measurements from live traffic over guessed/curated numbers,
+for local *and cloud* models alike, once enough requests have been logged
+(`metrics.live_speed_min_samples`, default 5). Below that: local models fall
+back to the synthetic micro-bench, then a params-based guess; cloud models
+fall back to a curated family speed estimate (throughput) or a flat neutral
+prior (latency — there's no curated per-family TTFT guess to fall back to,
+by design, since inventing one would defeat the point). Every ranked model
+reports `speed_source`/`ttft_source` (`live`/`bench`/`estimated`) so you can
+see which numbers are real; `mrouter doctor` summarizes the fleet-wide mix
+in a `perf_sources` check. See
+[CONFIG.md](CONFIG.md#metrics-tray-app--dashboard) for every knob (retention,
+poll interval, window choices, live-sample thresholds).
 
 ## Tests
 
@@ -277,14 +287,17 @@ knob (retention, poll interval, window choices).
 python3 -m unittest discover -s tests -v
 ```
 
-172 hermetic tests: scoring, cost math, sensitive-invariant routing, classifier
+199 hermetic tests: scoring, cost math, sensitive-invariant routing, classifier
 shapes (incl. mocked decision models), full proxy integration against in-process fake
 upstreams, config loading, learning bounds, live-rankings behavior
 (slug matching, record mapping, modes, cache/fetch lifecycle), reliability
 scoring, the automatic-maintenance layer (autolearn throttling/forcing,
-autobench staleness detection + dedup, `doctor` report checks), and the
+autobench staleness detection + dedup, `doctor` report checks), the
 on-device metrics store (windowed percentiles, per-model breakdown, pruning,
-live-speed-score feed into routing, tray-app menu rendering).
+tray-app menu rendering), and real-world-perf scoring (live/bench/estimated
+speed+TTFT provenance for local and cloud models, whole-fleet normalization
+guards against thin-sample outliers, malformed-config resilience, `doctor`'s
+perf-source mix check).
 
 ## License
 

@@ -21,6 +21,13 @@ REF_INPUT_TOKENS = 4000
 REF_OUTPUT_TOKENS = 1000
 REF_CACHED_TOKENS = 2000  # half the prompt assumed cache-hit when cache pricing exists
 
+# Neutral score when NO real measurement exists at all (no live traffic, no
+# bench entry) -- used for TTFT, which has no curated per-family fallback
+# the way throughput has `speed_est`. Deliberately a flat, honest "unknown"
+# rather than an invented number: a brand-new model should neither win nor
+# lose on latency it's never actually produced.
+NEUTRAL_PERF_SCORE = 50.0
+
 
 # ---------------------------------------------------------------- family KB
 
@@ -113,32 +120,94 @@ def _mem_fit_score(model, config):
     return max(0.0, round(100 - (ratio - 0.35) * 180, 1))
 
 
-def _speed_score(model, fleet, bench, fam_info, live_speed=None, live_min_samples=5):
-    """Measured tok/s for locals: live traffic (metrics_store) first when
-    enough fresh samples exist, then the synthetic micro-bench, then a
-    params-based fallback. Cloud always uses the family estimate.
+def _speed_score(model, fleet, bench, fam_info, live_perf=None, live_min_samples=5):
+    """Real-world throughput (tokens/sec) score for ANY model, local or cloud.
 
-    live_speed: optional {model_key: {tokens_per_sec_p90, samples}} from
-    metrics_store.window_summary()['models']; None/omitted triggers the
-    live-bench entries to be skipped (caller decides whether to load it).
+    Precedence, honest about provenance via the returned source label:
+      1. 'live'      -- real p90 tokens/sec from metrics_store (this fleet's
+                        own measured traffic), once >= live_min_samples
+                        requests have been logged for this model. Applies to
+                        BOTH local and cloud models -- a cloud model that has
+                        actually been routed enough times gets scored on what
+                        it really does, not a guessed number.
+      2. 'bench'     -- LOCAL ONLY: the synthetic micro-bench
+                        (bench_results.json) from `mrouter bench`/autobench.
+      3. 'estimated' -- the curated family `speed_est` (cloud) or a
+                        params-based relative guess (local with neither live
+                        nor bench data, e.g. brand new / never benched).
+
+    Returns (score_0_to_100, source). live_perf: optional
+    {model_key: {tokens_per_sec_p90, samples}} from
+    metrics_store.window_summary()['models']; None/omitted means no live data
+    was loaded (caller's choice -- score_fleet auto-loads it by default).
     """
+    live = (live_perf or {}).get(model["key"])
+    if live and (live.get("samples") or 0) >= live_min_samples and live.get("tokens_per_sec_p90"):
+        # Real traffic is normalized across the WHOLE fleet (local + cloud
+        # together), not split by locality: once we have honest measurements,
+        # a fast cloud model and a fast local model are directly comparable,
+        # and that comparison is exactly what routing needs. Only peers that
+        # ALSO clear live_min_samples count toward the normalization "best" --
+        # a thin/noisy single-sample reading elsewhere must not be able to
+        # crush every properly-qualified model's score.
+        qualified = [
+            ((live_perf or {}).get(m["key"]) or {}).get("tokens_per_sec_p90")
+            for m in fleet
+            if (((live_perf or {}).get(m["key"]) or {}).get("samples") or 0) >= live_min_samples
+        ]
+        best = max((v for v in qualified if v), default=live["tokens_per_sec_p90"])
+        return round(100 * live["tokens_per_sec_p90"] / max(best, 1e-9), 1), "live"
     if model.get("is_local"):
-        live = (live_speed or {}).get(model["key"])
-        if live and (live.get("samples") or 0) >= live_min_samples and live.get("tokens_per_sec_p90"):
-            best = max(
-                (((live_speed or {}).get(m["key"]) or {}).get("tokens_per_sec_p90") or 0)
-                for m in fleet if m.get("is_local")
-            ) or 1
-            return round(100 * live["tokens_per_sec_p90"] / max(best, 1e-9), 1)
         measured = _bench_lookup(bench, model["key"])
         if measured and measured.get("tokens_per_sec"):
             best = max((b.get("tokens_per_sec") or 0) for b in (bench or {}).values()) or 1
-            return round(100 * measured["tokens_per_sec"] / max(best, 1e-9), 1)
+            return round(100 * measured["tokens_per_sec"] / max(best, 1e-9), 1), "bench"
         params = [m["params_b"] or 0.1 for m in fleet if m.get("is_local")]
         if params:
-            return round(100 * min(params) / (model["params_b"] or 0.1), 1)
+            return round(100 * min(params) / (model["params_b"] or 0.1), 1), "estimated"
     est = (fam_info or {}).get("speed_est", config_default_speed(model))
-    return float(est)
+    return float(est), "estimated"
+
+
+def _ttft_score(model, fleet, bench, live_perf=None, live_min_samples=5):
+    """Real-world time-to-first-token (latency) score for ANY model, local or
+    cloud. Lower TTFT is better; score is normalized against the best (lowest)
+    TTFT observed among comparable peers, same precedence/provenance shape as
+    `_speed_score`:
+
+      1. 'live'      -- real p90 TTFT from metrics_store, >= live_min_samples.
+                        Local and cloud both qualify.
+      2. 'bench'     -- LOCAL ONLY: the synthetic micro-bench's measured ttft_s.
+      3. 'estimated' -- NEUTRAL_PERF_SCORE flat prior. There is no curated
+                        per-family TTFT guess in family_kb (unlike speed_est)
+                        -- inventing one would defeat the point of this
+                        component, so an honestly-unknown model gets a flat,
+                        non-penalizing score instead of a fabricated number.
+
+    Returns (score_0_to_100, source).
+    """
+    live = (live_perf or {}).get(model["key"])
+    if live and (live.get("samples") or 0) >= live_min_samples and live.get("ttft_p90_s") is not None:
+        # Same whole-fleet normalization rationale as _speed_score: local vs.
+        # cloud TTFT are directly comparable once both are real measurements.
+        # Same qualification guard too -- only peers that clear
+        # live_min_samples count toward the "best" (lowest) TTFT used to
+        # normalize; an unqualified single-sample outlier must not corrupt it.
+        qualified = [
+            ((live_perf or {}).get(m["key"]) or {}).get("ttft_p90_s")
+            for m in fleet
+            if (((live_perf or {}).get(m["key"]) or {}).get("samples") or 0) >= live_min_samples
+        ]
+        qualified = [t for t in qualified if t is not None and t > 0]
+        best = min(qualified) if qualified else live["ttft_p90_s"]
+        return round(100 * best / max(live["ttft_p90_s"], 1e-9), 1), "live"
+    if model.get("is_local"):
+        measured = _bench_lookup(bench, model["key"])
+        if measured and measured.get("ttft_s"):
+            candidates = [b.get("ttft_s") for b in (bench or {}).values() if b.get("ttft_s")]
+            best = min(candidates) if candidates else measured["ttft_s"]
+            return round(100 * best / max(measured["ttft_s"], 1e-9), 1), "bench"
+    return NEUTRAL_PERF_SCORE, "estimated"
 
 
 def config_default_speed(model):
@@ -237,16 +306,30 @@ def load_bench():
 
 # ---------------------------------------------------------------- scoring engine
 
-def _component_scores(model, fleet, config, bench, live_cache, live_speed=None):
+def _safe_int(value, default):
+    """Parse an int from a hand-editable config value, degrading to `default`
+    on anything malformed (wrong type, None, unparsable string) instead of
+    raising. This is read on every scored model on every request -- a typo'd
+    or null config value must never be able to take down routing."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _component_scores(model, fleet, config, bench, live_cache, live_perf=None):
     chat_cap, fam, fam_info, chat_src = _resolve_capability(model, config, "chat", live_cache)
     code_cap, _, _, code_src = _resolve_capability(model, config, "coding", live_cache)
     think_cap, _, _, think_src = _resolve_capability(model, config, "thinking", live_cache)
-    source = next((s for s in (chat_src, code_src, think_src) if s != "curated"), "curated")
+    capability_source = next((s for s in (chat_src, code_src, think_src) if s != "curated"), "curated")
     notes = (config.get("family_kb", {}).get(fam, {}) or {}).get("notes", "") if fam else ""
     est_cost = providers_mod.estimate_cost_usd(model, REF_INPUT_TOKENS, REF_OUTPUT_TOKENS, REF_CACHED_TOKENS)
-    live_min_samples = int((config.get("metrics", {}) or {}).get("live_speed_min_samples", 5))
+    live_min_samples = _safe_int((config.get("metrics") or {}).get("live_speed_min_samples", 5), default=5)
+    speed, speed_source = _speed_score(model, fleet, bench, fam_info, live_perf, live_min_samples)
+    ttft, ttft_source = _ttft_score(model, fleet, bench, live_perf, live_min_samples)
     comps = {
-        "speed": _speed_score(model, fleet, bench, fam_info, live_speed, live_min_samples),
+        "speed": speed,
+        "ttft": ttft,
         "capability_chat": chat_cap * 10,
         "capability_coding": code_cap * 10,
         "capability_thinking": think_cap * 10,
@@ -261,14 +344,15 @@ def _component_scores(model, fleet, config, bench, live_cache, live_speed=None):
         "privacy": _privacy_score(model),
         "reliability": None,  # filled in by score_fleet once stats are resolved
     }
-    return comps, notes, est_cost, source
+    sources = {"capability": capability_source, "speed": speed_source, "ttft": ttft_source}
+    return comps, notes, est_cost, sources
 
 
-def _load_live_speed(config):
-    """Best-effort {model_key: {tokens_per_sec_p90, samples}} from metrics_store
-    over the configured default window. Never raises: scoring must work even
-    if the metrics db is missing/corrupt/disabled -- it's a feed-in, not a
-    dependency."""
+def _load_live_perf(config):
+    """Best-effort {model_key: {tokens_per_sec_p90, ttft_p90_s, samples}} from
+    metrics_store over the configured default window, for BOTH local and
+    cloud models. Never raises: scoring must work even if the metrics db is
+    missing/corrupt/disabled -- it's a feed-in, not a dependency."""
     if not (config.get("metrics", {}) or {}).get("enabled", True):
         return {}
     try:
@@ -276,7 +360,11 @@ def _load_live_speed(config):
         window_s = metrics_store.resolve_window_seconds(config)
         summary = metrics_store.window_summary(config, window_seconds=window_s)
         return {
-            key: {"tokens_per_sec_p90": m.get("tokens_per_sec_p90"), "samples": m.get("requests", 0)}
+            key: {
+                "tokens_per_sec_p90": m.get("tokens_per_sec_p90"),
+                "ttft_p90_s": m.get("ttft_p90_s"),
+                "samples": m.get("requests", 0),
+            }
             for key, m in (summary.get("models") or {}).items()
         }
     except Exception:
@@ -294,18 +382,19 @@ def eligible_models(models, config, use_case):
     return list(models)
 
 
-def score_fleet(models, config, bench=None, learned=None, live_records=None, reliability=None, live_speed=None):
+def score_fleet(models, config, bench=None, learned=None, live_records=None, reliability=None, live_perf=None):
     """Return {use_case: {label, description, models:[ranked...]}}.
 
     live_records: optional raw ranking records (Artificial Analysis shape).
     reliability:  optional {model_key: {samples, success_rate, score}} from
                   reliability.compute_reliability(); loaded from log when None.
-    live_speed:   optional {model_key: {tokens_per_sec_p90, samples}} feeding
-                  the local-model speed component from real traffic instead of
-                  the synthetic micro-bench; loaded from metrics_store (the
-                  configured default window) when None, unless metrics are
-                  disabled, in which case it stays empty and speed falls back
-                  to bench/family estimates as before.
+    live_perf:    optional {model_key: {tokens_per_sec_p90, ttft_p90_s, samples}}
+                  feeding the speed/ttft components from real traffic instead
+                  of guessed/curated numbers, for LOCAL AND CLOUD models alike.
+                  Loaded from metrics_store (the configured default window)
+                  when None, unless metrics are disabled, in which case it
+                  stays empty and speed/ttft fall back to bench/estimated
+                  values as before this feature existed.
     """
     bench = bench if bench is not None else load_bench()
     learned = learned if learned is not None else learning.load_learned(config)
@@ -313,8 +402,8 @@ def score_fleet(models, config, bench=None, learned=None, live_records=None, rel
         live_records = rankings.load_rankings(config)
     if reliability is None:
         reliability = reliability_mod.compute_reliability(config)
-    if live_speed is None:
-        live_speed = _load_live_speed(config)
+    if live_perf is None:
+        live_perf = _load_live_perf(config)
     mode = (config.get("rankings", {}) or {}).get("mode", "curated")
     live_cache = (mode, live_records)
     routing = config.get("routing", {}) or {}
@@ -328,7 +417,7 @@ def score_fleet(models, config, bench=None, learned=None, live_records=None, rel
             reliability, m["key"], floor=rel_floor, min_samples=rel_min_n)]
         ranked = []
         for m in pool:
-            comps, notes, est_cost, cap_source = _component_scores(m, models, config, bench, live_cache, live_speed)
+            comps, notes, est_cost, sources = _component_scores(m, models, config, bench, live_cache, live_perf)
             comps["reliability"] = reliability_mod.reliability_score(reliability, m["key"])
             weights = uc_cfg["weights"]
             base = sum(comps[k] * w for k, w in weights.items() if k in comps)
@@ -341,7 +430,8 @@ def score_fleet(models, config, bench=None, learned=None, live_records=None, rel
                 "is_local": bool(m.get("is_local")), "display_name": m["display_name"],
                 "score": score, "base_score": round(base, 1), "learned_adj": adj,
                 "components": comps, "reason": contrib, "notes": notes,
-                "capability_source": cap_source,
+                "capability_source": sources["capability"],
+                "speed_source": sources["speed"], "ttft_source": sources["ttft"],
                 "est_cost_usd": round(est_cost, 6),
                 "cost_input_per_m": round((m.get("cost_input_per_token") or 0) * 1e6, 4),
                 "cost_output_per_m": round((m.get("cost_output_per_token") or 0) * 1e6, 4),

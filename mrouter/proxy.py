@@ -381,7 +381,8 @@ class Handler(BaseHTTPRequestHandler):
                     "best": rr["models"][0]["key"] if rr["models"] else None,
                     "score": rr["models"][0]["score"] if rr["models"] else None,
                     "est_cost_usd": rr["models"][0]["est_cost_usd"] if rr["models"] else None,
-                    "top3": [{"key": m["key"], "score": m["score"], "est_cost_usd": m["est_cost_usd"]}
+                    "top3": [{"key": m["key"], "score": m["score"], "est_cost_usd": m["est_cost_usd"],
+                              "speed_source": m["speed_source"], "ttft_source": m["ttft_source"]}
                              for m in rr["models"][:3]],
                 }
             self._send(200, {"routes": out, "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S")})

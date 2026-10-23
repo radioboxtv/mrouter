@@ -304,11 +304,19 @@ JSONL log on every poll.
   for the menu-bar title and dropdown.
 - **`tray_live_window_seconds`**: the fixed window `/v1/metrics/live` uses for
   the tray's cheap per-tick snapshot (doesn't follow the 1h/24h toggle).
-- **`live_speed_min_samples`**: a local model's speed score prefers its real
-  p90 tokens/sec from live traffic over the synthetic micro-bench once at
-  least this many requests have been logged for it in the default window;
-  below that, `bench_results.json` (or the params-based fallback) is used, as
-  before this feature existed.
+- **`live_speed_min_samples`**: a model's `speed` AND `ttft` scores prefer
+  real p90 tokens/sec / p90 TTFT from live traffic over guessed numbers once
+  at least this many requests have been logged for it in the default window
+  — **for local and cloud models alike**. Below that: local models fall back
+  to `bench_results.json` (from `mrouter bench`/autobench) then a
+  params-based guess; cloud models fall back straight to the curated family
+  `speed_est` (throughput) or a flat neutral prior (TTFT — there's no curated
+  per-family latency guess to fall back to, by design; see below).
+  `heuristics.score_fleet()`'s ranked rows report `speed_source` and
+  `ttft_source` (`live` / `bench` / `estimated`) per model so routing
+  decisions and the dashboard can show which numbers are real vs. guessed.
+  `mrouter doctor` surfaces a `perf_sources` check summarizing the mix
+  fleet-wide.
 
 `GET /v1/metrics?window=1h|24h` returns requests, errors, error_rate,
 `ttft_p50_s`/`ttft_p90_s`, `tokens_per_min_p90`, `spend_actual_usd` (computed
@@ -317,6 +325,39 @@ models), a bucketed `series` for the volume sparkline, and a `models` map with
 per-model request/error counts, use-case breakdown, p90 TTFT/tok-s, and
 `live`/`recent` status. `GET /v1/metrics/live` returns the same shape over the
 small fixed `tray_live_window_seconds` window, for cheap frequent polling.
+
+### Real-world performance feeds model selection, not just the dashboard
+
+Two scoring components use this data directly, with `ttft` new alongside
+`speed` (each use case's weights in `config.example.json` split what used to
+be a single `speed` weight roughly 2:1 into `speed` + `ttft`, so total weight
+per use case is unchanged):
+
+- **`speed`** — real-world throughput (tokens/sec). `live` > `bench`
+  (local-only) > `estimated` (curated `speed_est` for cloud, params-based
+  guess for local).
+- **`ttft`** — real-world time-to-first-token (latency; lower is better,
+  normalized against the fastest fleet member actually observed). `live` >
+  `bench` (local-only, from the micro-bench's measured `ttft_s`) >
+  `estimated` — a flat neutral prior (50/100), **never a fabricated number**:
+  unlike throughput, there is no curated per-family TTFT guess in
+  `family_kb`, because a plausible-looking invented latency number would be
+  worse than admitting "unknown" for a model that's never actually been
+  routed.
+
+Both components normalize `live` measurements across the **whole fleet**
+(local + cloud together) once there's real data for a model — a genuinely
+fast cloud model and a genuinely fast local model become directly comparable
+on fact, not on a local-measured-vs-cloud-guessed mismatch.
+
+**Existing `config.json` from before this feature:** if your use-case
+weights don't have a `ttft` entry, the `ttft` component simply contributes
+nothing to scoring (missing weight keys are skipped, not treated as an
+error) — routing still works, it just isn't latency-aware until you add one.
+Copy the `ttft` weight from the matching use case in the current
+`config.example.json` (each use case split its old `speed` weight ~2:1 into
+`speed` + `ttft`, so totals stay ~1.0), or regenerate a fresh config via
+`mrouter init` if you haven't customized yours.
 
 `mrouter tray` launches a macOS menu-bar app showing these metrics (menu-bar
 title: spend + p90 TTFT; dropdown: 1h/24h toggle, KPIs, and an active/recent
