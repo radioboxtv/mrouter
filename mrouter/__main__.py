@@ -177,6 +177,31 @@ def cmd_reliability(args):
     return 0
 
 
+def cmd_classifier_reliability(args):
+    """Decision-provider (baseten/jev) reliability — the circuit breaker that
+    skips a proven-bad provider before paying its network timeout, distinct
+    from `mrouter reliability` which covers routed MODELS, not classifiers."""
+    from mrouter import reliability as rel_mod
+    config = discovery.load_config()
+    stats = rel_mod.compute_classifier_reliability(config)
+    if not stats:
+        print("No classifier attempts logged yet. Route some 'auto' traffic, then re-run.")
+        return 0
+    decision = config.get("decision", {}) or {}
+    floor = float(decision.get("reliability_floor", 0.5))
+    min_n = int(decision.get("reliability_min_samples", 5))
+    print(f"{'PROVIDER':20} {'SCORE':>6} {'SUCCESS':>8} {'SAMPLES':>8}  STATUS")
+    print("-" * 58)
+    for k in sorted(stats, key=lambda k: -stats[k]["score"]):
+        v = stats[k]
+        sr = f"{v['success_rate']*100:.0f}%" if v["success_rate"] is not None else "?"
+        below = rel_mod.is_below_floor(stats, k, floor=floor, min_samples=min_n)
+        flag = "  ⚠ CIRCUIT OPEN" if below else ""
+        print(f"  {k:18} {v['score']:>6.1f} {sr:>8} {v['samples']:>8}{flag}")
+    print(f"\nBreaker: success_rate < {floor:.0%} with ≥{min_n} samples → skipped without a network call")
+    return 0
+
+
 def cmd_doctor(args):
     from . import doctor
     config = discovery.load_config()
@@ -191,6 +216,8 @@ def cmd_doctor(args):
         cmd_stats(argparse.Namespace())
         print("\n--- reliability ---")
         cmd_reliability(argparse.Namespace())
+        print("\n--- classifier-reliability ---")
+        cmd_classifier_reliability(argparse.Namespace())
     return 1 if report.has_fail else 0
 
 
@@ -249,12 +276,15 @@ def main(argv=None):
     sub.add_parser("learn", help="[debug] force an immediate learned.json recompute (serve does this automatically)")
     sub.add_parser("stats", help="[debug] show routing log totals and spend")
     sub.add_parser("reliability", help="[debug] show per-model reliability scores from route log")
+    sub.add_parser("classifier-reliability",
+                    help="[debug] show per-provider classifier reliability + circuit breaker status")
 
     args = p.parse_args(argv)
     fn = {"init": cmd_init, "serve": cmd_serve, "doctor": cmd_doctor, "feedback": cmd_feedback,
           "scan": cmd_scan, "suggest": cmd_suggest, "bench": cmd_bench,
           "classify": cmd_classify, "learn": cmd_learn,
-          "stats": cmd_stats, "reliability": cmd_reliability}[args.cmd]
+          "stats": cmd_stats, "reliability": cmd_reliability,
+          "classifier-reliability": cmd_classifier_reliability}[args.cmd]
     return fn(args)
 
 

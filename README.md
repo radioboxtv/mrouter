@@ -129,7 +129,14 @@ with per-model $/M pricing).
    probabilities are **blended** across use-case rankings, and any prompt
    whose `sensitive` probability crosses the floor is forced onto the
    local-only route. Provider chain via `decision.provider`:
-   `auto` (Baseten → Jev → local) | `baseten` | `jev` | `local`.
+   `auto` (Baseten → Jev → local) | `baseten` | `jev` | `local`. Every
+   Baseten/Jev attempt is logged and scored the same way model reliability
+   is (time-decayed success rate, shrunk to a neutral prior) — a provider
+   that's been failing consistently trips a **circuit breaker**
+   (`decision.reliability_floor`/`reliability_min_samples`) and gets skipped
+   straight to the next one in the chain instead of paying its network
+   timeout on every request. `mrouter doctor` reports breaker status;
+   `mrouter classifier-reliability` shows the per-provider table.
 3. **Scoring.** Each model gets feature scores — capability (curated family
    knowledge base), speed (measured for local, family estimate for cloud),
    context tier, multimodality, tool-use, RAM fit, `cost_efficiency`
