@@ -12,6 +12,7 @@ Adjustments are bounded so a few bad samples cannot wreck routing.
 
 import json
 import os
+import threading
 import time
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -22,6 +23,15 @@ BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # with isolated tmp paths don't bleed state into each other.
 AUTOLEARN_MIN_INTERVAL_S = 5.0
 _last_autolearn = {}
+# serve() runs a ThreadingHTTPServer: multiple request threads can each
+# trigger append_log -> _maybe_autolearn concurrently. json.dump() issues
+# several small writes, not one atomic syscall, so two unsynchronized writers
+# racing on learned.json could interleave and corrupt it. This lock only
+# serializes mrouter's own writers; it does not make the file safe against a
+# concurrent external writer or a crash mid-write (tracked as a broader
+# atomic-write/locking need in issue #15) — it closes the specific new
+# concurrency exposure autolearn introduces.
+_autolearn_lock = threading.Lock()
 
 
 def _path(config, key, default):
@@ -62,7 +72,8 @@ def _maybe_autolearn(config, force=False):
         return
     _last_autolearn[key] = now
     try:
-        save_learned(config)
+        with _autolearn_lock:
+            save_learned(config)
     except Exception as e:
         print(f"[mrouter] autolearn failed ({type(e).__name__}: {e}); will retry", flush=True)
 
