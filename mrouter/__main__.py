@@ -151,6 +151,28 @@ def cmd_stats(args):
     return 0
 
 
+def cmd_reliability(args):
+    from mrouter import reliability as rel_mod
+    config = discovery.load_config()
+    stats = rel_mod.compute_reliability(config)
+    if not stats:
+        print("No request data yet. Route some traffic, then run: mrouter reliability")
+        return 0
+    routing = config.get("routing", {}) or {}
+    floor = float(routing.get("reliability_floor", 0.5))
+    min_n = int(routing.get("reliability_min_samples", 5))
+    print(f"{'MODEL':50} {'SCORE':>6} {'SUCCESS':>8} {'SAMPLES':>8}  STATUS")
+    print("-" * 88)
+    for k in sorted(stats, key=lambda k: -stats[k]["score"]):
+        v = stats[k]
+        sr = f"{v['success_rate']*100:.0f}%" if v["success_rate"] is not None else "?"
+        below = rel_mod.is_below_floor(stats, k, floor=floor, min_samples=min_n)
+        flag = "  ⚠ BELOW FLOOR" if below else ""
+        print(f"  {k:48} {v['score']:>6.1f} {sr:>8} {v['samples']:>8}{flag}")
+    print(f"\nFloor: success_rate < {floor:.0%} with ≥{min_n} samples → excluded from routing pools")
+    return 0
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="mrouter", description="Multiplexing heuristic model router (LM Studio + Aperture, Jev-aware)")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -175,11 +197,12 @@ def main(argv=None):
     pf.add_argument("--note", default="")
     sub.add_parser("learn", help="recompute learned adjustments from route_log.jsonl")
     sub.add_parser("stats", help="show routing log totals and spend")
+    sub.add_parser("reliability", help="show per-model reliability scores from route log")
 
     args = p.parse_args(argv)
     fn = {"scan": cmd_scan, "suggest": cmd_suggest, "bench": cmd_bench, "serve": cmd_serve,
           "classify": cmd_classify, "feedback": cmd_feedback, "learn": cmd_learn,
-          "stats": cmd_stats}[args.cmd]
+          "stats": cmd_stats, "reliability": cmd_reliability}[args.cmd]
     return fn(args)
 
 
