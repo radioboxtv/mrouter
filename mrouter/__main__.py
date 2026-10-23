@@ -1,4 +1,4 @@
-"""mrouter CLI: scan | suggest | bench | serve | classify | feedback | learn | stats"""
+"""mrouter CLI: init | serve | doctor | feedback  (+ debug: scan/suggest/bench/classify/learn/stats/reliability)"""
 
 import argparse
 import json
@@ -103,7 +103,9 @@ def cmd_bench(args):
 def cmd_serve(args):
     from . import proxy
     config = discovery.load_config()
-    proxy.serve(config, host=args.host, port=args.port)
+    # serve_forever restarts the HTTP server on crashes — matters for launchd/daemon use,
+    # where there's no human watching to notice a dead process and restart it by hand.
+    proxy.serve_forever(config, host=args.host, port=args.port)
     return 0
 
 
@@ -117,14 +119,16 @@ def cmd_classify(args):
 def cmd_feedback(args):
     config = discovery.load_config()
     rating = 1 if args.rating in ("+1", "1", "good") else -1
-    entry = learning.append_feedback(config, args.use_case, args.model, rating, args.note or "")
-    learning.save_learned(config)
+    learning.append_feedback(config, args.use_case, args.model, rating, args.note or "")
     print(f"Recorded feedback ({'+' if rating > 0 else '-'}1) for {args.model} in '{args.use_case}'.")
-    print("Adjusted scores will apply on the next suggest/serve. Run: python3 -m mrouter learn")
+    print("Learned adjustments were recomputed automatically — already live for the next request.")
     return 0
 
 
 def cmd_learn(args):
+    # Manual override only: normal operation never needs this — `serve` recomputes
+    # learned.json automatically after every logged request and every feedback vote.
+    # Useful right after hand-editing route_log.jsonl, or to force a recompute now.
     config = discovery.load_config()
     out = learning.save_learned(config)
     entries = learning.load_log(config)
@@ -173,35 +177,83 @@ def cmd_reliability(args):
     return 0
 
 
+def cmd_doctor(args):
+    from . import doctor
+    config = discovery.load_config()
+    report = doctor.run(config, verbose=args.verbose)
+    doctor.print_report(report, verbose=args.verbose)
+    if args.verbose:
+        print("\n--- scan ---")
+        cmd_scan(argparse.Namespace(local_only=False))
+        print("\n--- suggest ---")
+        cmd_suggest(argparse.Namespace(use_case=None, top=3, local_only=False, json=False))
+        print("\n--- stats ---")
+        cmd_stats(argparse.Namespace())
+        print("\n--- reliability ---")
+        cmd_reliability(argparse.Namespace())
+    return 1 if report.has_fail else 0
+
+
+def cmd_init(args):
+    from . import init as init_mod
+    return init_mod.run(
+        gateway_url=args.gateway_url,
+        gateway_key_env=args.gateway_key_env,
+        skip_launchd=args.no_launchd,
+        skip_hermes=args.no_hermes,
+        non_interactive=args.yes,
+    )
+
+
 def main(argv=None):
-    p = argparse.ArgumentParser(prog="mrouter", description="Multiplexing heuristic model router (LM Studio + Aperture, Jev-aware)")
+    p = argparse.ArgumentParser(
+        prog="mrouter",
+        description="Multiplexing heuristic model router (LM Studio + Aperture, Jev-aware). "
+                     "Day-to-day surface: init (once), serve (daemon), doctor (health check).")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    ps = sub.add_parser("scan", help="list discovered local + Aperture models and pricing")
-    ps.add_argument("--local-only", action="store_true")
-    pg = sub.add_parser("suggest", help="recommend best model per use case across the fleet")
-    pg.add_argument("--use-case", choices=["chat", "coding", "sensitive", "thinking"])
-    pg.add_argument("--top", type=int, default=3)
-    pg.add_argument("--local-only", action="store_true")
-    pg.add_argument("--json", action="store_true")
-    sub.add_parser("bench", help="micro-benchmark local TTFT + tok/s")
-    pv = sub.add_parser("serve", help="start multiplexing routing proxy")
+    # --- primary surface: the only things a human should need in normal operation
+    pi = sub.add_parser("init", help="one-time setup: configure endpoints, install launchd agent, wire up Hermes")
+    pi.add_argument("--gateway-url", default=None, help="cloud gateway base URL, e.g. https://gw.example.com/v1")
+    pi.add_argument("--gateway-key-env", default=None, help="env var name holding the gateway API key")
+    pi.add_argument("--no-launchd", action="store_true", help="skip installing the launchd agent (macOS)")
+    pi.add_argument("--no-hermes", action="store_true", help="skip wiring up a local Hermes Agent profile")
+    pi.add_argument("--yes", action="store_true", help="non-interactive: accept defaults, don't prompt")
+
+    pv = sub.add_parser("serve", help="start the multiplexing routing proxy (auto-starts LM Studio, "
+                         "auto-benches new local models, auto-learns from traffic)")
     pv.add_argument("--host", default=None)
     pv.add_argument("--port", type=int, default=None)
-    pc = sub.add_parser("classify", help="classify a prompt (Jev if key present, else local)")
-    pc.add_argument("text", nargs="*")
-    pf = sub.add_parser("feedback", help="record explicit feedback to improve routing")
+
+    pd = sub.add_parser("doctor", help="health check: endpoints, pricing, classifier, bench freshness, "
+                         "reliability floor, autolearn — the only maintenance command")
+    pd.add_argument("--verbose", "-v", action="store_true", help="also print scan/suggest/stats/reliability detail")
+
+    pf = sub.add_parser("feedback", help="record explicit feedback to improve routing (teaches the router)")
     pf.add_argument("use_case", choices=["chat", "coding", "sensitive", "thinking"])
     pf.add_argument("model", help="fleet key, e.g. aperture:deepseek/deepseek-v4-flash")
     pf.add_argument("rating", choices=["+1", "-1"])
     pf.add_argument("--note", default="")
-    sub.add_parser("learn", help="recompute learned adjustments from route_log.jsonl")
-    sub.add_parser("stats", help="show routing log totals and spend")
-    sub.add_parser("reliability", help="show per-model reliability scores from route log")
+
+    # --- debug/inspection surface: not needed day-to-day; doctor --verbose covers most of this
+    ps = sub.add_parser("scan", help="[debug] list discovered local + Aperture models and pricing")
+    ps.add_argument("--local-only", action="store_true")
+    pg = sub.add_parser("suggest", help="[debug] recommend best model per use case across the fleet")
+    pg.add_argument("--use-case", choices=["chat", "coding", "sensitive", "thinking"])
+    pg.add_argument("--top", type=int, default=3)
+    pg.add_argument("--local-only", action="store_true")
+    pg.add_argument("--json", action="store_true")
+    sub.add_parser("bench", help="[debug] force a synchronous micro-benchmark now (serve does this automatically)")
+    pc = sub.add_parser("classify", help="[debug] classify a prompt (Baseten/Jev if key present, else local)")
+    pc.add_argument("text", nargs="*")
+    sub.add_parser("learn", help="[debug] force an immediate learned.json recompute (serve does this automatically)")
+    sub.add_parser("stats", help="[debug] show routing log totals and spend")
+    sub.add_parser("reliability", help="[debug] show per-model reliability scores from route log")
 
     args = p.parse_args(argv)
-    fn = {"scan": cmd_scan, "suggest": cmd_suggest, "bench": cmd_bench, "serve": cmd_serve,
-          "classify": cmd_classify, "feedback": cmd_feedback, "learn": cmd_learn,
+    fn = {"init": cmd_init, "serve": cmd_serve, "doctor": cmd_doctor, "feedback": cmd_feedback,
+          "scan": cmd_scan, "suggest": cmd_suggest, "bench": cmd_bench,
+          "classify": cmd_classify, "learn": cmd_learn,
           "stats": cmd_stats, "reliability": cmd_reliability}[args.cmd]
     return fn(args)
 
