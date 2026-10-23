@@ -39,25 +39,50 @@ _DEFAULT_UPSTREAM_TIMEOUT_S = 600.0
 
 
 def _resilience_cfg(config):
-    """Resolve the resilience policy, defaulting on every missing knob so an
-    old config.json (predating this feature) still gets retry + fallback."""
+    """Resolve the resilience policy, defaulting on every missing OR malformed
+    knob so a bad `resilience` block (wrong types from a hand-edited
+    config.json) degrades to the safe defaults instead of raising out of
+    every /v1/chat/completions request -- a config typo must not turn a
+    resilience feature into a full outage."""
     r = config.get("resilience") or {}
     retry = r.get("retry") or {}
     fallback = r.get("fallback") or {}
     cb = r.get("circuit_breaker") or {}
+
+    def _int(val, default, floor=None):
+        try:
+            v = int(val)
+        except (TypeError, ValueError):
+            return default
+        return max(floor, v) if floor is not None else v
+
+    def _float(val, default, floor=None):
+        try:
+            v = float(val)
+        except (TypeError, ValueError):
+            return default
+        return max(floor, v) if floor is not None else v
+
     try:
         on_status = {int(s) for s in retry.get("on_status", _DEFAULT_RETRY_ON_STATUS)}
     except (TypeError, ValueError):
         on_status = set(_DEFAULT_RETRY_ON_STATUS)
+
     return {
-        "max_attempts": max(1, int(retry.get("max_attempts", _DEFAULT_RETRY_MAX_ATTEMPTS))),
-        "backoff_s": max(0.0, float(retry.get("backoff_s", _DEFAULT_RETRY_BACKOFF_S))),
+        "max_attempts": _int(retry.get("max_attempts", _DEFAULT_RETRY_MAX_ATTEMPTS),
+                              _DEFAULT_RETRY_MAX_ATTEMPTS, floor=1),
+        "backoff_s": _float(retry.get("backoff_s", _DEFAULT_RETRY_BACKOFF_S),
+                             _DEFAULT_RETRY_BACKOFF_S, floor=0.0),
         "on_status": on_status,
         "fallback_enabled": bool(fallback.get("enabled", _DEFAULT_FALLBACK_ENABLED)),
-        "max_models": max(1, int(fallback.get("max_models", _DEFAULT_FALLBACK_MAX_MODELS))),
-        "cb_failure_threshold": int(cb.get("failure_threshold", _DEFAULT_CB_FAILURE_THRESHOLD)),
-        "cb_cooldown_s": max(0.0, float(cb.get("cooldown_s", _DEFAULT_CB_COOLDOWN_S))),
-        "timeout_s": max(0.1, float(r.get("upstream_timeout_s", _DEFAULT_UPSTREAM_TIMEOUT_S))),
+        "max_models": _int(fallback.get("max_models", _DEFAULT_FALLBACK_MAX_MODELS),
+                            _DEFAULT_FALLBACK_MAX_MODELS, floor=1),
+        "cb_failure_threshold": _int(cb.get("failure_threshold", _DEFAULT_CB_FAILURE_THRESHOLD),
+                                      _DEFAULT_CB_FAILURE_THRESHOLD),
+        "cb_cooldown_s": _float(cb.get("cooldown_s", _DEFAULT_CB_COOLDOWN_S),
+                                 _DEFAULT_CB_COOLDOWN_S, floor=0.0),
+        "timeout_s": _float(r.get("upstream_timeout_s", _DEFAULT_UPSTREAM_TIMEOUT_S),
+                             _DEFAULT_UPSTREAM_TIMEOUT_S, floor=0.1),
     }
 
 

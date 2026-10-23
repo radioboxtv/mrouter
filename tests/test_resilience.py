@@ -186,7 +186,12 @@ class FallbackTest(ResilienceTestCase):
     def test_cloud_runner_up_succeeds_when_top_pick_500s(self):
         """Top-ranked cloud model 500s once; forces fallback onto the next
         ranked candidate, which must succeed on its first attempt."""
-        fleet = fx.standard_fleet()
+        fleet = [m for m in fx.standard_fleet() if not m["is_local"]]  # cloud-only:
+        # excludes local models so this test isn't at the mercy of the real
+        # repo's bench_results.json (heuristics.load_bench() reads a real,
+        # non-test-isolated path -- tracked separately as a backlog issue;
+        # stale local bench data can make a local model unpredictably
+        # outscore the fixture's fake cloud candidates and starve fallback).
         cfg = self._config()
         self._patch_fleet(fleet)
 
@@ -372,6 +377,24 @@ class ConfigurableTimeoutTest(ResilienceTestCase):
         self.assertEqual(rcfg["cb_failure_threshold"], 5)
         self.assertEqual(rcfg["cb_cooldown_s"], 60.0)
         self.assertIn(503, rcfg["on_status"])
+
+    def test_resilience_cfg_degrades_to_defaults_on_malformed_values(self):
+        """A hand-edited config.json with the wrong type in any resilience
+        knob must never crash request handling -- a config typo degrading to
+        safe defaults beats turning a resilience feature into an outage."""
+        from mrouter.proxy import _resilience_cfg
+        for bad in (
+            {"resilience": {"circuit_breaker": {"failure_threshold": "five"}}},
+            {"resilience": {"retry": {"max_attempts": None}}},
+            {"resilience": {"retry": {"on_status": "not-a-list"}}},
+            {"resilience": {"upstream_timeout_s": "forever"}},
+            {"resilience": {"retry": {"backoff_s": []}}},
+            {"resilience": {"fallback": {"max_models": {}}}},
+        ):
+            rcfg = _resilience_cfg(bad)  # must not raise
+            self.assertEqual(rcfg["max_attempts"], 2)
+            self.assertEqual(rcfg["timeout_s"], 600.0)
+            self.assertIn(503, rcfg["on_status"])
 
 
 if __name__ == "__main__":
