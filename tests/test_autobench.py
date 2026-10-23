@@ -67,5 +67,41 @@ class TestRouterAutobenchDedup(unittest.TestCase):
             heuristics.stale_local_models = orig_stale_local_models
 
 
+class TestRouterAutobenchNonBlocking(unittest.TestCase):
+    """fleet() runs on every request-handling thread (FLEET_TTL_S refresh) —
+    _maybe_autobench must never block that thread on a network call or the
+    ~60s `lms server start`, even when LM Studio is down."""
+
+    def test_maybe_autobench_does_not_block_on_lm_studio_liveness(self):
+        from mrouter import proxy, discovery
+        from unittest import mock
+
+        cfg = discovery.load_config()
+        router = proxy.Router(cfg)
+        m = fx.make_local("qwen/qwen3.8-27b")
+        router._fleet = [m]
+
+        import mrouter.heuristics as heuristics
+        orig_load_bench = heuristics.load_bench
+        heuristics.load_bench = lambda: {}
+
+        # Slow stand-in for the real network call; if it ran on the calling
+        # thread this test would take >1s and fail the elapsed-time assertion.
+        def slow_server_alive(cfg):
+            time.sleep(1.0)
+            return False
+
+        try:
+            with mock.patch.object(discovery, "server_alive", side_effect=slow_server_alive), \
+                 mock.patch.object(discovery, "start_server", return_value=False):
+                started = time.time()
+                router._maybe_autobench()
+                elapsed = time.time() - started
+            self.assertLess(elapsed, 0.5, "_maybe_autobench must return immediately; "
+                             "the LM Studio check belongs on the background thread")
+        finally:
+            heuristics.load_bench = orig_load_bench
+
+
 if __name__ == "__main__":
     unittest.main()

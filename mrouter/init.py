@@ -34,6 +34,11 @@ EXAMPLE_PATH = os.path.join(BASE, "config.example.json")
 LAUNCHD_LABEL = "com.mrouter.serve"
 LAUNCHD_PLIST = os.path.expanduser(f"~/Library/LaunchAgents/{LAUNCHD_LABEL}.plist")
 SERVE_SCRIPT = os.path.join(BASE, "scripts", "serve.sh")
+# Older/ad-hoc installs used other labels pointing at the same serve.sh; if one
+# of these is already loaded, installing our own on top would start a second
+# `serve` process fighting over the same proxy port. Detected by scanning
+# ProgramArguments for serve.sh rather than guessing every possible label.
+_LAUNCHD_AGENTS_DIR = os.path.expanduser("~/Library/LaunchAgents")
 
 
 def _ask(prompt, default=""):
@@ -101,6 +106,37 @@ def _step_config(gateway_url, gateway_key_env, non_interactive):
     return cfg
 
 
+def _find_existing_serve_agent():
+    """Scan ~/Library/LaunchAgents for any plist whose ProgramArguments already
+    point at our serve.sh (by label `com.mrouter.serve` or any older/ad-hoc
+    label from a pre-init install) — installing a second one would collide on
+    the same proxy port. Returns the plist path, or None."""
+    if not os.path.isdir(_LAUNCHD_AGENTS_DIR):
+        return None
+    try:
+        import plistlib
+    except ImportError:
+        plistlib = None
+    for name in os.listdir(_LAUNCHD_AGENTS_DIR):
+        if not name.endswith(".plist"):
+            continue
+        path = os.path.join(_LAUNCHD_AGENTS_DIR, name)
+        try:
+            if plistlib is not None:
+                with open(path, "rb") as f:
+                    data = plistlib.load(f)
+                args = data.get("ProgramArguments") or []
+                if any(SERVE_SCRIPT == a or a.endswith("/scripts/serve.sh") for a in args):
+                    return path
+            else:
+                with open(path) as f:
+                    if "serve.sh" in f.read():
+                        return path
+        except Exception:
+            continue
+    return None
+
+
 def _step_launchd(skip, non_interactive):
     print("\n[3/5] Run at login (launchd, macOS)")
     if skip:
@@ -112,6 +148,14 @@ def _step_launchd(skip, non_interactive):
         return
     if os.path.exists(LAUNCHD_PLIST):
         print(f"  already installed: {LAUNCHD_PLIST}")
+        return
+    existing = _find_existing_serve_agent()
+    if existing:
+        print(f"  found an existing launchd agent already running mrouter: {existing}")
+        print("  skipping — installing a second one would start two `serve` processes "
+              "competing for the same port. Remove the old one first if you want init's "
+              "agent instead:")
+        print(f"    launchctl bootout gui/$(id -u) {existing} && rm {existing}")
         return
     if not non_interactive:
         if _ask("Install a launchd agent to run `mrouter serve` at login? (y/n)", "y").lower() not in ("y", "yes"):

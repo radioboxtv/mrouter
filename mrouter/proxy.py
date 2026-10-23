@@ -46,8 +46,10 @@ class Router:
     def _maybe_autobench(self):
         """Background micro-benchmark for any local model missing fresh bench
         data, so routing speed scores stay accurate with zero manual `mrouter
-        bench` runs. Fire-and-forget: one daemon thread per newly-seen stale
-        model key, deduped so repeated fleet refreshes don't pile up threads."""
+        bench` runs. Fully fire-and-forget: dispatched onto its own daemon
+        thread immediately, including the LM-Studio liveness/start check —
+        `fleet()` is called on every request-handling thread, so nothing here
+        may block waiting on a network call or a 60s `lms server start`."""
         try:
             max_age_h = float((self.config.get("bench", {}) or {}).get("max_age_hours", 7 * 24))
             bench = heuristics.load_bench()
@@ -60,10 +62,20 @@ class Router:
                 self._benched_keys.add(m["key"])
         if not todo:
             return
-        if not discovery.server_alive(self.config):
-            if not discovery.start_server(self.config):
-                return  # can't bench without a live LM Studio server; try again next refresh
-        threading.Thread(target=self._run_bench, args=(todo,), daemon=True).start()
+        threading.Thread(target=self._bench_worker, args=(todo,), daemon=True).start()
+
+    def _bench_worker(self, models):
+        """Runs entirely off the request-handling thread: liveness check,
+        best-effort LM Studio start, then the benchmark itself."""
+        try:
+            if not discovery.server_alive(self.config):
+                if not discovery.start_server(self.config):
+                    return  # can't bench without a live LM Studio server; try again next refresh
+            self._run_bench(models)
+        finally:
+            with self._bench_lock:
+                for m in models:
+                    self._benched_keys.discard(m["key"])
 
     def _run_bench(self, models):
         from . import bench as bench_mod
@@ -73,10 +85,6 @@ class Router:
             bench_mod.run_bench(models, self.config)
         except Exception as e:
             print(f"[mrouter] auto-bench failed ({type(e).__name__}: {e})", flush=True)
-        finally:
-            with self._bench_lock:
-                for m in models:
-                    self._benched_keys.discard(m["key"])
 
     def by_key(self, key):
         return next((m for m in self.fleet() if m["key"] == key), None)
