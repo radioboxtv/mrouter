@@ -136,11 +136,28 @@
   #json-raw:focus { border-color: var(--accent); }
   .json-toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
 
-  /* status dots */
+  /* dot */
   .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
   .dot.green { background: var(--green); box-shadow: 0 0 6px var(--green); }
   .dot.red { background: var(--red); }
   .dot.grey { background: var(--muted); }
+  .dot.live { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .dot.recent { background: var(--muted); }
+
+  /* dashboard */
+  .kpis { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-bottom: 18px; }
+  .kpi { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; }
+  .kpi .label { font-size: 10.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .kpi .val { font-size: 21px; font-weight: 700; margin-top: 4px; }
+  .kpi .sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .kpi.warn .val { color: var(--yellow); }
+  .kpi.bad .val { color: var(--red); }
+  .kpi.good .val { color: var(--green); }
+  .row2 { display: grid; grid-template-columns: 1.3fr 1fr; gap: 14px; margin-bottom: 14px; }
+  .spark { display: flex; align-items: flex-end; gap: 3px; height: 64px; }
+  .spark .bar { flex: 1; background: var(--accent); border-radius: 2px 2px 0 0; opacity: .85; min-height: 2px; }
+  .spark .bar.err { background: var(--red); }
+  .ucs-cell { font-size: 11px; color: var(--muted); }
 </style>
 </head>
 <body>
@@ -157,6 +174,7 @@
 
 <nav>
   <div class="tab active" onclick="showTab('routes')">Routes</div>
+  <div class="tab" onclick="showTab('dashboard')">Dashboard</div>
   <div class="tab" onclick="showTab('providers')">Providers</div>
   <div class="tab" onclick="showTab('weights')">Use-case weights</div>
   <div class="tab" onclick="showTab('json')">JSON editor</div>
@@ -170,6 +188,38 @@
   <hr class="sep">
   <h2>Reliability (from route log)</h2>
   <div id="reliability-list" class="hint">Loading…</div>
+</div>
+
+<!-- DASHBOARD -->
+<div class="page" id="tab-dashboard">
+  <div class="row" style="margin-bottom:16px">
+    <h2 style="margin:0">Live perf, models, reliability &amp; spend</h2>
+    <div class="spacer"></div>
+    <div class="seg" id="dash-window-seg">
+      <button class="dash-win active" data-window="1h" onclick="setDashWindow('1h')">1h</button>
+      <button class="dash-win" data-window="24h" onclick="setDashWindow('24h')">24h</button>
+    </div>
+  </div>
+
+  <div class="kpis" id="dash-kpis"><p class="hint">Loading…</p></div>
+
+  <div class="row2">
+    <div class="card">
+      <h3>Request volume &amp; errors</h3>
+      <div class="spark" id="dash-spark"></div>
+    </div>
+    <div class="card">
+      <h3>Reliability (window)</h3>
+      <table id="dash-reliability"><tr><td class="hint">Loading…</td></tr></table>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Models — active &amp; recently used</h3>
+    <table id="dash-models">
+      <tr><th></th><th>Model</th><th>Use case(s)</th><th>Reqs</th><th>p90 TTFT</th><th>p90 tok/s</th><th>Error rate</th><th>Spend</th></tr>
+    </table>
+  </div>
 </div>
 
 <!-- PROVIDERS -->
@@ -255,6 +305,7 @@ function showTab(id) {
   document.querySelector(`.tab[onclick="showTab('${id}')"]`).classList.add('active');
   document.getElementById('tab-' + id).classList.add('active');
   if (id === 'routes') loadRoutes();
+  if (id === 'dashboard') loadDashboard();
   if (id === 'providers') loadProviders();
   if (id === 'weights') loadWeights();
   if (id === 'json') refreshJson();
@@ -466,6 +517,118 @@ async function removeProvider(key) {
     toast('Provider removed');
     loadProviders();
   } catch(e) { toast(String(e), 'err'); }
+}
+
+// ── DASHBOARD PAGE ────────────────────────────────────────────────────────────
+let _dashWindow = '1h';
+
+function setDashWindow(w) {
+  _dashWindow = w;
+  document.querySelectorAll('.dash-win').forEach(b => b.classList.toggle('active', b.dataset.window === w));
+  loadDashboard();
+}
+
+/** Join use-case names for a model row, truncated so the UI stays readable
+ * when a model serves many use cases: first `max` names, then "+N more". */
+function formatUseCases(useCases, max=2) {
+  if (!useCases || !useCases.length) return '\u2014';
+  const names = useCases.map(u => u.use_case);
+  if (names.length <= max) return names.join(', ');
+  const shown = names.slice(0, max).join(', ');
+  const extra = names.length - max;
+  return `${shown} +${extra} more`;
+}
+
+async function loadDashboard() {
+  try {
+    const summary = await fetch(API + '/v1/metrics?window=' + _dashWindow).then(r => r.json());
+    renderDashKpis(summary);
+    renderDashSpark(summary);
+    renderDashReliability(summary);
+    renderDashModels(summary);
+  } catch(e) {
+    document.getElementById('dash-kpis').innerHTML = `<p class="hint" style="color:var(--red)">${e}</p>`;
+  }
+}
+
+function fmtUsd(v) { return v == null ? '\u2014' : `$${v.toFixed(v < 0.01 ? 4 : 2)}`; }
+function fmtMs(s) { return s == null ? '\u2014' : (s < 1 ? `${Math.round(s*1000)}ms` : `${s.toFixed(2)}s`); }
+
+function renderDashKpis(summary) {
+  const errPct = (summary.error_rate * 100).toFixed(1);
+  const errClass = summary.error_rate > 0.05 ? 'bad' : summary.error_rate > 0.01 ? 'warn' : 'good';
+  const ttftClass = (summary.ttft_p90_s || 0) > 1.5 ? 'warn' : '';
+  document.getElementById('dash-kpis').innerHTML = `
+    <div class="kpi">
+      <div class="label">Spend (${_dashWindow})</div>
+      <div class="val">${fmtUsd(summary.spend_total_usd)}</div>
+      <div class="sub">actual ${fmtUsd(summary.spend_actual_usd)} \u00b7 est ${fmtUsd(summary.spend_estimated_usd)}</div>
+    </div>
+    <div class="kpi">
+      <div class="label">Requests</div>
+      <div class="val">${summary.requests}</div>
+      <div class="sub">${summary.errors} failed</div>
+    </div>
+    <div class="kpi ${errClass}">
+      <div class="label">Error rate</div>
+      <div class="val">${errPct}%</div>
+      <div class="sub">&nbsp;</div>
+    </div>
+    <div class="kpi ${ttftClass}">
+      <div class="label">p90 TTFT</div>
+      <div class="val">${fmtMs(summary.ttft_p90_s)}</div>
+      <div class="sub">p50 ${fmtMs(summary.ttft_p50_s)}</div>
+    </div>
+    <div class="kpi">
+      <div class="label">p90 Tok/min</div>
+      <div class="val">${summary.tokens_per_min_p90 != null ? Math.round(summary.tokens_per_min_p90).toLocaleString() : '\u2014'}</div>
+      <div class="sub">across fleet</div>
+    </div>`;
+}
+
+function renderDashSpark(summary) {
+  const series = summary.series || [];
+  const max = Math.max(1, ...series.map(b => b.requests));
+  document.getElementById('dash-spark').innerHTML = series.map(b => {
+    const h = Math.max(4, Math.round((b.requests / max) * 100));
+    const cls = b.errors > 0 ? 'bar err' : 'bar';
+    return `<div class="${cls}" style="height:${h}%" title="${b.requests} req, ${b.errors} err"></div>`;
+  }).join('');
+}
+
+function renderDashReliability(summary) {
+  const models = summary.models || {};
+  const rows = Object.entries(models).map(([key, m]) => {
+    const rate = m.requests ? Math.round(((m.requests - m.errors) / m.requests) * 100) : null;
+    const color = rate == null ? 'var(--muted)' : rate >= 95 ? 'var(--green)' : rate >= 80 ? 'var(--yellow)' : 'var(--red)';
+    const flag = rate != null && rate < 90 ? ' \u26a0' : '';
+    return `<tr><td class="mono">${key.split('/').pop()}</td><td style="text-align:right;color:${color}">${rate != null ? rate + '%' : '?'}${flag}</td></tr>`;
+  });
+  const el = document.getElementById('dash-reliability');
+  el.innerHTML = rows.length ? rows.join('') : '<tr><td class="hint">No traffic in this window.</td></tr>';
+}
+
+function renderDashModels(summary) {
+  const models = summary.models || {};
+  const header = '<tr><th></th><th>Model</th><th>Use case(s)</th><th>Reqs</th><th>p90 TTFT</th><th>p90 tok/s</th><th>Error rate</th></tr>';
+  const rows = Object.entries(models)
+    .sort((a, b) => b[1].requests - a[1].requests)
+    .map(([key, m]) => {
+      const dotClass = m.status === 'live' ? 'dot live' : 'dot recent';
+      const errPct = m.requests ? Math.round((m.errors / m.requests) * 100) : 0;
+      const ucLabel = formatUseCases(m.use_cases);
+      return `<tr>
+        <td><span class="${dotClass}"></span></td>
+        <td class="mono">${key.split('/').pop()}</td>
+        <td class="ucs-cell" title="${(m.use_cases||[]).map(u=>u.use_case).join(', ')}">${ucLabel}</td>
+        <td>${m.requests}</td>
+        <td>${fmtMs(m.ttft_p90_s)}</td>
+        <td>${m.tokens_per_sec_p90 != null ? m.tokens_per_sec_p90.toFixed(0) : '\u2014'}</td>
+        <td>${errPct}%</td>
+      </tr>`;
+    });
+  document.getElementById('dash-models').innerHTML = header + (rows.length ? rows.join('')
+    : '<tr><td colspan="7" class="hint">No traffic in this window.</td></tr>');
 }
 
 // ── WEIGHTS PAGE ──────────────────────────────────────────────────────────────

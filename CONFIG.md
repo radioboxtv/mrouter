@@ -269,6 +269,66 @@ of the composite score). Tune the weight like any other component.
   script or after hand-editing the log — normal operation never needs it.
 - Reset anytime: delete both files.
 
+## Metrics (tray app & dashboard)
+
+```json
+"metrics": {
+  "enabled": true,
+  "db_file": "metrics.db",
+  "default_window": "1h",
+  "windows_available": ["1h", "24h"],
+  "retention_days": 7,
+  "tray_poll_seconds": 10,
+  "tray_live_window_seconds": 300,
+  "live_speed_min_samples": 5
+}
+```
+
+Every routed request also writes one row to a local SQLite store
+(`metrics.db`, WAL mode, gitignored like other machine-local state) — separate
+from `route_log.jsonl`, which stays the audit/learning log unchanged.
+`mrouter/metrics_store.py` answers windowed aggregate queries (percentiles,
+per-model breakdown, bucketed volume series) without rescanning the whole
+JSONL log on every poll.
+
+- **`enabled`**: `false` disables metrics writes entirely (no `metrics.db`
+  created, `/v1/metrics*` return empty windows, live-speed scoring falls back
+  to bench/family estimates).
+- **`default_window`** / **`windows_available`**: the time-window toggle shown
+  in the tray dropdown and dashboard tab (`1h` / `24h` by default). Pass
+  `?window=1h|24h|<seconds>` to `GET /v1/metrics` to query any window.
+- **`retention_days`**: rows older than this are pruned on a throttled
+  schedule (checked on every write, actually prunes at most once per 5
+  minutes) — keeps `metrics.db` small indefinitely.
+- **`tray_poll_seconds`**: how often `mrouter tray` polls `/v1/metrics/live`
+  for the menu-bar title and dropdown.
+- **`tray_live_window_seconds`**: the fixed window `/v1/metrics/live` uses for
+  the tray's cheap per-tick snapshot (doesn't follow the 1h/24h toggle).
+- **`live_speed_min_samples`**: a local model's speed score prefers its real
+  p90 tokens/sec from live traffic over the synthetic micro-bench once at
+  least this many requests have been logged for it in the default window;
+  below that, `bench_results.json` (or the params-based fallback) is used, as
+  before this feature existed.
+
+`GET /v1/metrics?window=1h|24h` returns requests, errors, error_rate,
+`ttft_p50_s`/`ttft_p90_s`, `tokens_per_min_p90`, `spend_actual_usd` (computed
+from real usage × pricing) vs. `spend_estimated_usd` (fallback for unpriced
+models), a bucketed `series` for the volume sparkline, and a `models` map with
+per-model request/error counts, use-case breakdown, p90 TTFT/tok-s, and
+`live`/`recent` status. `GET /v1/metrics/live` returns the same shape over the
+small fixed `tray_live_window_seconds` window, for cheap frequent polling.
+
+`mrouter tray` launches a macOS menu-bar app showing these metrics (menu-bar
+title: spend + p90 TTFT; dropdown: 1h/24h toggle, KPIs, and an active/recent
+model list with each model's use case(s) — truncated to the first couple of
+names plus "+N more" when a model serves several). This is the one place
+mrouter takes on a dependency beyond the stdlib: install
+[`rumps`](https://github.com/jaredks/rumps) (`python3 -m pip install rumps`)
+first; without it, `mrouter tray` prints an install hint and exits — the core
+proxy/CLI stay zero-dependency either way. The dashboard tab in the browser UI
+(`mrouter/ui.html`, served at `/ui`) shows the same data in more detail and
+needs no extra dependency.
+
 ## Family knowledge base
 
 `family_kb` maps name patterns to capability scores; the first matching entry

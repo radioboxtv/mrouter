@@ -20,7 +20,7 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import categorize, discovery, heuristics, learning, providers as providers_mod
+from . import categorize, discovery, heuristics, learning, metrics_store, providers as providers_mod
 
 FLEET_TTL_S = 30
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.json")
@@ -283,6 +283,31 @@ def _candidates_for_request(router, payload, requested_route, limit=None):
     return None, [], classification
 
 
+def _metrics_entry(use_case, model, provider_name, status_code, ttft_s, duration_s, usage):
+    """Build one metrics_store row from a completed/failed request.
+
+    cost_is_estimate=True whenever actual_cost_usd couldn't be computed from
+    real usage x pricing (e.g. unpriced cloud model) and we fall back to the
+    scoring engine's representative-request estimate instead of leaving the
+    dashboard's spend figure blank.
+    """
+    cost = providers_mod.actual_cost_usd(model, usage) if model else None
+    is_estimate = False
+    if cost is None and model is not None:
+        cost = providers_mod.estimate_cost_usd(model)
+        is_estimate = True
+    tokens_in = (usage or {}).get("prompt_tokens")
+    tokens_out = (usage or {}).get("completion_tokens")
+    return {
+        "ts": time.time(), "use_case": use_case,
+        "model_key": model["key"] if model else None,
+        "provider": provider_name, "status_code": status_code,
+        "ttft_s": ttft_s, "duration_s": duration_s,
+        "tokens_in": tokens_in, "tokens_out": tokens_out,
+        "cost_usd": cost, "cost_is_estimate": is_estimate,
+    }
+
+
 class Handler(BaseHTTPRequestHandler):
     router = None  # set by serve()
 
@@ -370,6 +395,20 @@ class Handler(BaseHTTPRequestHandler):
                 "total_actual_cost_usd": round(total_cost, 6),
                 "learned_adjustments": learned,
             })
+            return
+        if self.path.startswith("/v1/metrics/live"):
+            # Cheap tick for the tray icon: small fixed window, no window param parsing.
+            live_window_s = float((cfg.get("metrics", {}) or {}).get("tray_live_window_seconds", 300))
+            summary = metrics_store.window_summary(cfg, window_seconds=live_window_s)
+            self._send(200, summary)
+            return
+        if self.path.startswith("/v1/metrics"):
+            qs = self.path.split("?", 1)[1] if "?" in self.path else ""
+            params = dict(p.split("=", 1) for p in qs.split("&") if "=" in p)
+            window = params.get("window")
+            window_s = metrics_store.resolve_window_seconds(cfg, window)
+            summary = metrics_store.window_summary(cfg, window_seconds=window_s)
+            self._send(200, summary)
             return
         self._send(404, {"error": "not found"})
 
@@ -554,6 +593,10 @@ class Handler(BaseHTTPRequestHandler):
                 "actual_cost_usd": None, "stream": stream,
                 "fallback_attempt": cand_idx + 1, "fallback_total": len(candidates),
             })
+            metrics_store.record(cfg, _metrics_entry(
+                use_case, model, provider_name,
+                last_status if last_status is not None else 0, None,
+                round(time.time() - started, 3), None))
             should_fallback = (
                 rcfg["fallback_enabled"] and not is_last_candidate and
                 (failure_is_retryable_status or failure_is_connection_error)
@@ -646,6 +689,10 @@ class Handler(BaseHTTPRequestHandler):
                 "stream": True,
                 "fallback_attempt": cand_idx + 1, "fallback_total": len(candidates),
             })
+            metrics_store.record(cfg, _metrics_entry(
+                use_case, model, provider_name, resp.status,
+                round(ttft, 3) if ttft else None,
+                round(time.time() - started, 3), usage))
         else:
             data = resp.read()
             usage = None
@@ -665,6 +712,9 @@ class Handler(BaseHTTPRequestHandler):
                 "stream": False,
                 "fallback_attempt": cand_idx + 1, "fallback_total": len(candidates),
             })
+            metrics_store.record(cfg, _metrics_entry(
+                use_case, model, provider_name, resp.status, None,
+                round(time.time() - started, 3), usage))
             self._send(resp.status, data, extra)
 
 

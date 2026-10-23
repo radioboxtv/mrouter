@@ -416,5 +416,16 @@
     },
     "upstream_timeout_s": 600,
     "note": "Per-request resilience policy for the routing proxy (do_POST /v1/chat/completions). retry: on a retryable status, retries the SAME model up to max_attempts times with backoff_s*attempt sleep between tries. fallback: on an exhausted-retry failure (retryable status OR a connection/timeout error), cascades to the next-ranked eligible candidate (up to max_models total attempts) instead of surfacing the error -- sensitive requests only ever fall back within the local-only pool, never to cloud. circuit_breaker: an in-process (not persisted) per-model consecutive-failure counter; a model with >= failure_threshold consecutive failures is deprioritized behind every healthy candidate until cooldown_s elapses, then gets one half-open trial request. upstream_timeout_s replaces the old hardcoded 600s urlopen timeout. Every attempt (not just the final outcome) is logged to route_log.jsonl and surfaced to the client via X-Routed-Attempts. Missing block/keys default to the values shown here, so old configs stay resilient without edits."
+  },
+  "metrics": {
+    "enabled": true,
+    "db_file": "metrics.db",
+    "default_window": "1h",
+    "windows_available": ["1h", "24h"],
+    "retention_days": 7,
+    "tray_poll_seconds": 10,
+    "tray_live_window_seconds": 300,
+    "live_speed_min_samples": 5,
+    "note": "On-device SQLite store (metrics.db, gitignored like other machine-local state) for live perf/spend metrics powering the tray app and dashboard tab: windowed p90 TTFT, p90 tokens/min, request volume, error rate, actual+estimated spend, per-model reliability/use-case breakdown. Separate from learning.log_file (route_log.jsonl), which stays the audit/learning log. windows_available controls the 1h/24h toggle in the tray/dashboard UI; default_window is used when no ?window= is given and also feeds heuristics' live-speed-score component (live_speed_min_samples requests required before live traffic overrides the bench/family speed estimate for a local model). retention_days prunes rows older than N days on a throttled schedule (every write, at most once per 5 minutes)."
   }
 }
