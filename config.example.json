@@ -399,5 +399,22 @@
     "reliability_floor": 0.5,
     "reliability_min_samples": 5,
     "note": "Which categorizer 'auto' uses: auto (baseten key -> jev key -> local), baseten, jev, local. reliability_floor/min_samples: circuit breaker -- a provider whose recent classifier-attempt success rate falls below the floor over at least min_samples attempts is skipped (straight to the next provider in the chain) instead of paying its network timeout on every request. 0.0 disables the breaker."
+  },
+  "resilience": {
+    "retry": {
+      "max_attempts": 2,
+      "backoff_s": 0.5,
+      "on_status": [429, 500, 502, 503, 504]
+    },
+    "fallback": {
+      "enabled": true,
+      "max_models": 3
+    },
+    "circuit_breaker": {
+      "failure_threshold": 5,
+      "cooldown_s": 60
+    },
+    "upstream_timeout_s": 600,
+    "note": "Per-request resilience policy for the routing proxy (do_POST /v1/chat/completions). retry: on a retryable status, retries the SAME model up to max_attempts times with backoff_s*attempt sleep between tries. fallback: on an exhausted-retry failure (retryable status OR a connection/timeout error), cascades to the next-ranked eligible candidate (up to max_models total attempts) instead of surfacing the error -- sensitive requests only ever fall back within the local-only pool, never to cloud. circuit_breaker: an in-process (not persisted) per-model consecutive-failure counter; a model with >= failure_threshold consecutive failures is deprioritized behind every healthy candidate until cooldown_s elapses, then gets one half-open trial request. upstream_timeout_s replaces the old hardcoded 600s urlopen timeout. Every attempt (not just the final outcome) is logged to route_log.jsonl and surfaced to the client via X-Routed-Attempts. Missing block/keys default to the values shown here, so old configs stay resilient without edits."
   }
 }
