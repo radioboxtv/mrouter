@@ -66,6 +66,17 @@ class ConfigIsolatedTestCase(unittest.TestCase):
         os.environ.pop("MROUTER_CONFIG", None)
         os.environ.pop("TYPESAFE_API_KEY", None)
         self._patch_learning_paths()
+        self._patch_metrics_path()
+
+    def _patch_metrics_path(self):
+        from mrouter import metrics_store
+        self._msp = metrics_store.db_path
+
+        def db_path_local(config):
+            return os.path.join(self.tmp, (config.get("metrics", {}) or {}).get("db_file", "metrics.db"))
+
+        metrics_store.db_path = db_path_local
+        self.metrics_store = metrics_store
 
     def _patch_learning_paths(self):
         from mrouter import learning
@@ -93,6 +104,8 @@ class ConfigIsolatedTestCase(unittest.TestCase):
     def tearDown(self):
         from mrouter import learning
         learning.log_path, learning.learned_path = self._lp
+        from mrouter import metrics_store
+        metrics_store.db_path = self._msp
         for k, v in self._saved_env.items():
             if v is None:
                 os.environ.pop(k, None)

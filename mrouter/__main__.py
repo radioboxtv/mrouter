@@ -202,6 +202,11 @@ def cmd_classifier_reliability(args):
     return 0
 
 
+def cmd_tray(args):
+    from . import trayapp
+    return trayapp.main()
+
+
 def cmd_doctor(args):
     from . import doctor
     config = discovery.load_config()
@@ -262,6 +267,9 @@ def main(argv=None):
     pf.add_argument("rating", choices=["+1", "-1"])
     pf.add_argument("--note", default="")
 
+    sub.add_parser("tray", help="launch the macOS menu-bar tray app (live perf/spend/models; "
+                   "requires: python3 -m pip install rumps)")
+
     # --- debug/inspection surface: not needed day-to-day; doctor --verbose covers most of this
     ps = sub.add_parser("scan", help="[debug] list discovered local + Aperture models and pricing")
     ps.add_argument("--local-only", action="store_true")
@@ -284,7 +292,7 @@ def main(argv=None):
           "scan": cmd_scan, "suggest": cmd_suggest, "bench": cmd_bench,
           "classify": cmd_classify, "learn": cmd_learn,
           "stats": cmd_stats, "reliability": cmd_reliability,
-          "classifier-reliability": cmd_classifier_reliability}[args.cmd]
+          "classifier-reliability": cmd_classifier_reliability, "tray": cmd_tray}[args.cmd]
     return fn(args)
 
 

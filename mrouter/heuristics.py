@@ -113,9 +113,23 @@ def _mem_fit_score(model, config):
     return max(0.0, round(100 - (ratio - 0.35) * 180, 1))
 
 
-def _speed_score(model, fleet, bench, fam_info):
-    """Measured tok/s for locals when benched; family estimate for cloud."""
+def _speed_score(model, fleet, bench, fam_info, live_speed=None, live_min_samples=5):
+    """Measured tok/s for locals: live traffic (metrics_store) first when
+    enough fresh samples exist, then the synthetic micro-bench, then a
+    params-based fallback. Cloud always uses the family estimate.
+
+    live_speed: optional {model_key: {tokens_per_sec_p90, samples}} from
+    metrics_store.window_summary()['models']; None/omitted triggers the
+    live-bench entries to be skipped (caller decides whether to load it).
+    """
     if model.get("is_local"):
+        live = (live_speed or {}).get(model["key"])
+        if live and (live.get("samples") or 0) >= live_min_samples and live.get("tokens_per_sec_p90"):
+            best = max(
+                (((live_speed or {}).get(m["key"]) or {}).get("tokens_per_sec_p90") or 0)
+                for m in fleet if m.get("is_local")
+            ) or 1
+            return round(100 * live["tokens_per_sec_p90"] / max(best, 1e-9), 1)
         measured = _bench_lookup(bench, model["key"])
         if measured and measured.get("tokens_per_sec"):
             best = max((b.get("tokens_per_sec") or 0) for b in (bench or {}).values()) or 1
@@ -223,15 +237,16 @@ def load_bench():
 
 # ---------------------------------------------------------------- scoring engine
 
-def _component_scores(model, fleet, config, bench, live_cache):
+def _component_scores(model, fleet, config, bench, live_cache, live_speed=None):
     chat_cap, fam, fam_info, chat_src = _resolve_capability(model, config, "chat", live_cache)
     code_cap, _, _, code_src = _resolve_capability(model, config, "coding", live_cache)
     think_cap, _, _, think_src = _resolve_capability(model, config, "thinking", live_cache)
     source = next((s for s in (chat_src, code_src, think_src) if s != "curated"), "curated")
     notes = (config.get("family_kb", {}).get(fam, {}) or {}).get("notes", "") if fam else ""
     est_cost = providers_mod.estimate_cost_usd(model, REF_INPUT_TOKENS, REF_OUTPUT_TOKENS, REF_CACHED_TOKENS)
+    live_min_samples = int((config.get("metrics", {}) or {}).get("live_speed_min_samples", 5))
     comps = {
-        "speed": _speed_score(model, fleet, bench, fam_info),
+        "speed": _speed_score(model, fleet, bench, fam_info, live_speed, live_min_samples),
         "capability_chat": chat_cap * 10,
         "capability_coding": code_cap * 10,
         "capability_thinking": think_cap * 10,
@@ -249,6 +264,25 @@ def _component_scores(model, fleet, config, bench, live_cache):
     return comps, notes, est_cost, source
 
 
+def _load_live_speed(config):
+    """Best-effort {model_key: {tokens_per_sec_p90, samples}} from metrics_store
+    over the configured default window. Never raises: scoring must work even
+    if the metrics db is missing/corrupt/disabled -- it's a feed-in, not a
+    dependency."""
+    if not (config.get("metrics", {}) or {}).get("enabled", True):
+        return {}
+    try:
+        from . import metrics_store
+        window_s = metrics_store.resolve_window_seconds(config)
+        summary = metrics_store.window_summary(config, window_seconds=window_s)
+        return {
+            key: {"tokens_per_sec_p90": m.get("tokens_per_sec_p90"), "samples": m.get("requests", 0)}
+            for key, m in (summary.get("models") or {}).items()
+        }
+    except Exception:
+        return {}
+
+
 def eligible_models(models, config, use_case):
     """Hard filters before scoring. `sensitive` NEVER leaves the machine."""
     routing = config.get("routing", {}) or {}
@@ -260,12 +294,18 @@ def eligible_models(models, config, use_case):
     return list(models)
 
 
-def score_fleet(models, config, bench=None, learned=None, live_records=None, reliability=None):
+def score_fleet(models, config, bench=None, learned=None, live_records=None, reliability=None, live_speed=None):
     """Return {use_case: {label, description, models:[ranked...]}}.
 
     live_records: optional raw ranking records (Artificial Analysis shape).
     reliability:  optional {model_key: {samples, success_rate, score}} from
                   reliability.compute_reliability(); loaded from log when None.
+    live_speed:   optional {model_key: {tokens_per_sec_p90, samples}} feeding
+                  the local-model speed component from real traffic instead of
+                  the synthetic micro-bench; loaded from metrics_store (the
+                  configured default window) when None, unless metrics are
+                  disabled, in which case it stays empty and speed falls back
+                  to bench/family estimates as before.
     """
     bench = bench if bench is not None else load_bench()
     learned = learned if learned is not None else learning.load_learned(config)
@@ -273,6 +313,8 @@ def score_fleet(models, config, bench=None, learned=None, live_records=None, rel
         live_records = rankings.load_rankings(config)
     if reliability is None:
         reliability = reliability_mod.compute_reliability(config)
+    if live_speed is None:
+        live_speed = _load_live_speed(config)
     mode = (config.get("rankings", {}) or {}).get("mode", "curated")
     live_cache = (mode, live_records)
     routing = config.get("routing", {}) or {}
@@ -286,7 +328,7 @@ def score_fleet(models, config, bench=None, learned=None, live_records=None, rel
             reliability, m["key"], floor=rel_floor, min_samples=rel_min_n)]
         ranked = []
         for m in pool:
-            comps, notes, est_cost, cap_source = _component_scores(m, models, config, bench, live_cache)
+            comps, notes, est_cost, cap_source = _component_scores(m, models, config, bench, live_cache, live_speed)
             comps["reliability"] = reliability_mod.reliability_score(reliability, m["key"])
             weights = uc_cfg["weights"]
             base = sum(comps[k] * w for k, w in weights.items() if k in comps)

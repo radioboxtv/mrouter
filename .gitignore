@@ -6,6 +6,9 @@ learned.json
 route_log.jsonl
 mrouter.launchd.log
 aa_cache.json
+metrics.db
+metrics.db-wal
+metrics.db-shm
 __pycache__/
 *.pyc
 .venv/

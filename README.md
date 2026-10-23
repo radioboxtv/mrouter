@@ -95,6 +95,7 @@ Day-to-day, this is the whole surface:
 python3 -m mrouter init      # one-time: config.json, launchd agent, Hermes wiring
 python3 -m mrouter serve     # the proxy — auto-starts LM Studio, auto-benches, auto-learns
 python3 -m mrouter doctor    # health check; the only "maintenance" command
+python3 -m mrouter tray      # macOS menu-bar app: live perf/spend/models (needs: pip install rumps)
 ```
 
 `feedback` is the one routine human action — teach the router a routing was
@@ -119,7 +120,12 @@ python3 -m mrouter reliability  # per-model reliability table
 
 Inspect a live router: `curl :8730/v1/routes` (best + top 3 per use case),
 `curl :8730/v1/stats` (spend + learned state), `curl :8730/v1/models` (fleet
-with per-model $/M pricing).
+with per-model $/M pricing), `curl :8730/v1/metrics?window=1h` (live perf —
+p90 TTFT, p90 tokens/min, request volume, error rate, actual+estimated spend,
+per-model reliability — over `1h`, `24h`, or raw seconds). Or open
+`http://127.0.0.1:8730/ui` for the browser dashboard, or run `mrouter tray`
+for the macOS menu-bar version (see [Metrics](#metrics-tray-app--dashboard)
+below).
 
 ## How routing works
 
@@ -231,18 +237,46 @@ weights, not local quants. Cache-first (24h `aa_cache.json`), needs a free
 `AA_API_KEY` only to refresh; key-less or offline it degrades silently to
 curated. See [CONFIG.md](CONFIG.md).
 
+## Metrics (tray app & dashboard)
+
+Every routed request writes one row to a lightweight on-device SQLite store
+(`metrics.db`, WAL mode) separate from `route_log.jsonl` (which stays the
+audit/learning log). It powers two surfaces over a configurable time window
+(`1h` / `24h` by default, editable in `config.json`):
+
+- **`mrouter tray`** — a macOS menu-bar app: spend + p90 TTFT in the title,
+  and a dropdown with the 1h/24h toggle, KPIs (spend, requests, error rate,
+  p90 TTFT, p90 tokens/min), and an active/recent model list. Each model
+  shows its use case(s) — truncated to the first couple plus "+N more" for
+  models that serve several. Needs `python3 -m pip install rumps` (the one
+  dependency beyond the stdlib anywhere in mrouter, isolated to this feature);
+  without it, `mrouter tray` prints an install hint and exits.
+- **Dashboard tab** in the browser UI at `http://127.0.0.1:8730/ui` — the
+  same metrics with more room: a request-volume/error sparkline, a
+  reliability table, and a fuller per-model breakdown. No extra dependency.
+
+`GET /v1/metrics?window=1h|24h|<seconds>` and the cheap-poll
+`GET /v1/metrics/live` back both surfaces. Local models' speed score in
+routing also prefers real p90 tokens/sec from this store over the synthetic
+micro-bench once enough live samples exist (`metrics.live_speed_min_samples`,
+default 5) — live traffic, not just a 24-token bench prompt, feeds routing
+decisions. See [CONFIG.md](CONFIG.md#metrics-tray-app--dashboard) for every
+knob (retention, poll interval, window choices).
+
 ## Tests
 
 ```bash
 python3 -m unittest discover -s tests -v
 ```
 
-103 hermetic tests: scoring, cost math, sensitive-invariant routing, classifier
+172 hermetic tests: scoring, cost math, sensitive-invariant routing, classifier
 shapes (incl. mocked decision models), full proxy integration against in-process fake
 upstreams, config loading, learning bounds, live-rankings behavior
 (slug matching, record mapping, modes, cache/fetch lifecycle), reliability
-scoring, and the automatic-maintenance layer (autolearn throttling/forcing,
-autobench staleness detection + dedup, `doctor` report checks).
+scoring, the automatic-maintenance layer (autolearn throttling/forcing,
+autobench staleness detection + dedup, `doctor` report checks), and the
+on-device metrics store (windowed percentiles, per-model breakdown, pruning,
+live-speed-score feed into routing, tray-app menu rendering).
 
 ## License
 

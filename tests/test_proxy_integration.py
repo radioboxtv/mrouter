@@ -9,7 +9,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import tests.fixtures as fx
-from mrouter import proxy  # noqa: E402
+from mrouter import metrics_store, proxy  # noqa: E402
 
 
 class _FakeUpstream(BaseHTTPRequestHandler):
@@ -300,6 +300,123 @@ class ProxyIntegrationTest(fx.ConfigIsolatedTestCase):
         # none leaked through.
         self.assertNotRegex(response_body.decode("latin-1", "replace"),
                              r"(?m)^[0-9a-f]+\r?\n")
+
+    # -------------------------------------------------------- metrics store
+
+    def _get(self, port, path):
+        req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", method="GET")
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r, json.loads(r.read().decode())
+
+    def test_non_streaming_request_writes_metrics_row(self):
+        fleet = fx.standard_fleet()
+        cfg, local_srv, cloud_srv = self._config_with_fakes(fleet)
+        self._patch_fleet(cfg, fleet)
+        srv = self._start_proxy(cfg)
+        port = srv.server_address[1]
+
+        self._post(port, {
+            "model": "deepseek/deepseek-v4-flash",
+            "messages": [{"role": "user", "content": "hi"}], "max_tokens": 5})
+
+        rows = self.metrics_store.query_window(cfg, since_ts=0)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["status_code"], 200)
+        self.assertEqual(rows[0]["tokens_in"], 1000)
+        self.assertEqual(rows[0]["tokens_out"], 100)
+        self.assertFalse(rows[0]["cost_is_estimate"])
+
+    def test_streaming_request_writes_metrics_row(self):
+        fleet = fx.standard_fleet()
+        cfg, local_srv, cloud_srv = self._config_with_fakes(fleet)
+        self._patch_fleet(cfg, fleet)
+        srv = self._start_proxy(cfg)
+        port = srv.server_address[1]
+
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/v1/chat/completions",
+            data=json.dumps({
+                "model": "deepseek/deepseek-v4-flash",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 5, "stream": True,
+            }).encode(),
+            headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=10) as r:
+            r.read()
+
+        rows = self.metrics_store.query_window(cfg, since_ts=0)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["status_code"], 200)
+        self.assertIsNotNone(rows[0]["ttft_s"])
+
+    def test_errored_request_writes_metrics_row_with_error_status(self):
+        fleet = fx.standard_fleet()
+        cfg, local_srv, cloud_srv = self._config_with_fakes(fleet)
+        self._patch_fleet(cfg, fleet)
+        srv = self._start_proxy(cfg)
+        port = srv.server_address[1]
+
+        class _BrokenUpstream(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                self.send_response(500)
+                data = b'{"error": "boom"}'
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+        broken = ThreadingHTTPServer(("127.0.0.1", 0), _BrokenUpstream)
+        broken.daemon_threads = True
+        threading.Thread(target=broken.serve_forever, daemon=True).start()
+        self.addCleanup(broken.server_close)
+        self.addCleanup(broken.shutdown)
+        cfg["lm_studio"]["api_base"] = f"http://127.0.0.1:{broken.server_port}/v1"
+
+        try:
+            self._post(port, {"model": "sensitive",
+                               "messages": [{"role": "user", "content": "x"}],
+                               "max_tokens": 5})
+        except urllib.error.HTTPError:
+            pass
+
+        rows = self.metrics_store.query_window(cfg, since_ts=0)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["status_code"], 500)
+
+    def test_metrics_endpoint_returns_window_summary(self):
+        fleet = fx.standard_fleet()
+        cfg, local_srv, cloud_srv = self._config_with_fakes(fleet)
+        self._patch_fleet(cfg, fleet)
+        srv = self._start_proxy(cfg)
+        port = srv.server_address[1]
+
+        self._post(port, {
+            "model": "deepseek/deepseek-v4-flash",
+            "messages": [{"role": "user", "content": "hi"}], "max_tokens": 5})
+
+        r, body = self._get(port, "/v1/metrics?window=1h")
+        self.assertEqual(r.status, 200)
+        self.assertEqual(body["requests"], 1)
+        self.assertIn("models", body)
+        self.assertIn("series", body)
+
+    def test_metrics_live_endpoint_is_cheap_recent_snapshot(self):
+        fleet = fx.standard_fleet()
+        cfg, local_srv, cloud_srv = self._config_with_fakes(fleet)
+        self._patch_fleet(cfg, fleet)
+        srv = self._start_proxy(cfg)
+        port = srv.server_address[1]
+
+        self._post(port, {
+            "model": "deepseek/deepseek-v4-flash",
+            "messages": [{"role": "user", "content": "hi"}], "max_tokens": 5})
+
+        r, body = self._get(port, "/v1/metrics/live")
+        self.assertEqual(r.status, 200)
+        self.assertIn("requests", body)
+        self.assertIn("spend_total_usd", body)
 
 
 if __name__ == "__main__":
