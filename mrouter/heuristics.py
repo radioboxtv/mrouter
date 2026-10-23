@@ -12,7 +12,7 @@ import math
 import os
 import time
 
-from . import learning, rankings
+from . import learning, rankings, reliability as reliability_mod
 from . import providers as providers_mod
 
 BENCH_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bench_results.json")
@@ -223,6 +223,7 @@ def _component_scores(model, fleet, config, bench, live_cache):
         "cost_efficiency": _cost_efficiency_score(model),
         "value": _value_score(model, config),
         "privacy": _privacy_score(model),
+        "reliability": None,  # filled in by score_fleet once stats are resolved
     }
     return comps, notes, est_cost, source
 
@@ -238,24 +239,34 @@ def eligible_models(models, config, use_case):
     return list(models)
 
 
-def score_fleet(models, config, bench=None, learned=None, live_records=None):
+def score_fleet(models, config, bench=None, learned=None, live_records=None, reliability=None):
     """Return {use_case: {label, description, models:[ranked...]}}.
 
     live_records: optional raw ranking records (Artificial Analysis shape).
-    Resolved capabilities honor config `rankings.mode` (curated|live|blend).
+    reliability:  optional {model_key: {samples, success_rate, score}} from
+                  reliability.compute_reliability(); loaded from log when None.
     """
     bench = bench if bench is not None else load_bench()
     learned = learned if learned is not None else learning.load_learned(config)
     if live_records is None:
         live_records = rankings.load_rankings(config)
+    if reliability is None:
+        reliability = reliability_mod.compute_reliability(config)
     mode = (config.get("rankings", {}) or {}).get("mode", "curated")
     live_cache = (mode, live_records)
+    routing = config.get("routing", {}) or {}
+    rel_floor = float(routing.get("reliability_floor", 0.0))
+    rel_min_n = int(routing.get("reliability_min_samples", 5))
     result = {}
     for uc, uc_cfg in config["use_cases"].items():
         pool = eligible_models(models, config, uc)
+        # Hard reliability floor: exclude chronically failing models (proven flaky only)
+        pool = [m for m in pool if not reliability_mod.is_below_floor(
+            reliability, m["key"], floor=rel_floor, min_samples=rel_min_n)]
         ranked = []
         for m in pool:
             comps, notes, est_cost, cap_source = _component_scores(m, models, config, bench, live_cache)
+            comps["reliability"] = reliability_mod.reliability_score(reliability, m["key"])
             weights = uc_cfg["weights"]
             base = sum(comps[k] * w for k, w in weights.items() if k in comps)
             adj = learning.adjustment_for(learned, uc, m["key"])
@@ -278,9 +289,9 @@ def score_fleet(models, config, bench=None, learned=None, live_records=None):
     return result
 
 
-def suggest(models, config, use_case, bench=None, learned=None):
+def suggest(models, config, use_case, bench=None, learned=None, reliability=None):
     """Best model for one use case: (model_dict, score_info)."""
-    ranked = score_fleet(models, config, bench, learned)[use_case]["models"]
+    ranked = score_fleet(models, config, bench, learned, reliability=reliability)[use_case]["models"]
     if not ranked:
         return None, None
     best = ranked[0]
