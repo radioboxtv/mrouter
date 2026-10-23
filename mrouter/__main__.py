@@ -3,9 +3,11 @@
 import argparse
 import json
 import sys
+import time
 
 from . import bench as bench_mod
 from . import categorize, discovery, heuristics, learning
+from . import eval_results as eval_mod
 
 
 def _load(include_cloud=True):
@@ -237,6 +239,81 @@ def cmd_init(args):
     )
 
 
+def cmd_eval(args):
+    config = discovery.load_config()
+    sub = getattr(args, "eval_cmd", None)
+
+    if sub == "submit":
+        result = eval_mod.submit_result(
+            config,
+            run_name=args.run_name,
+            model_key=args.model,
+            score=args.score,
+            pass_fail=args.pass_fail,
+            rubric_score=args.rubric_score,
+            llm_judge_score=args.llm_judge_score,
+            sample_count=args.samples or 0,
+            dataset=args.dataset,
+            version=args.version,
+            source=args.source or "cli",
+            tags=args.tags,
+            use_case=args.use_case,
+        )
+        if result is None:
+            print("Eval disabled in config.")
+            return 1
+        print(f"Submitted eval result: run={result['run_name']} model={result['model_key']} "
+              f"score={result['score']} n={result['sample_count']}")
+        return 0
+
+    if sub == "list":
+        rows = eval_mod.query_results(
+            config,
+            run_name=args.run_name,
+            model_key=args.model,
+            dataset=args.dataset,
+            source=args.source,
+            tags=args.tags,
+            use_case=args.use_case,
+            window_seconds=args.window,
+        )
+        if not rows:
+            print("No eval results found.")
+            return 0
+        print(f"{'RUN':24} {'MODEL':32} {'SCORE':>6} {'N':>6} {'SOURCE':12} {'TS'}")
+        print("-" * 100)
+        for r in rows:
+            ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(r["ts"]))
+            print(f"{r['run_name']:24} {r['model_key']:32} "
+                  f"{str(r.get('score') or ''):>6} {str(r.get('sample_count') or 0):>6} "
+                  f"{str(r.get('source') or ''):12} {ts}")
+        return 0
+
+    if sub == "summary":
+        from . import metrics_store
+        ws = metrics_store.resolve_window_seconds(config, args.window)
+        summary = eval_mod.window_summary(config, window_seconds=ws)
+        print(f"Eval summary (window={args.window or 'default'}):")
+        print(f"  runs={summary['run_count']} models={summary['model_count']} "
+              f"samples={summary['total_samples']} avg_score={summary['avg_score']} "
+              f"pass_rate={summary['pass_rate']}")
+        if summary["by_model"]:
+            print("\nBy model:")
+            for k, v in sorted(summary["by_model"].items()):
+                print(f"  {k:32} avg={v['avg_score']} n={v['sample_count']} "
+                      f"latest={v['latest_score']}")
+        if summary["by_run"]:
+            print("\nBy run:")
+            for k, v in sorted(summary["by_run"].items()):
+                print(f"  {k:24} avg={v['avg_score']} n={v['sample_count']} "
+                      f"source={v['source']} dataset={v['dataset']}")
+        return 0
+
+    # default: show help
+    print("Usage: mrouter eval {submit|list|summary}")
+    return 1
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(
         prog="mrouter",
@@ -267,6 +344,34 @@ def main(argv=None):
     pf.add_argument("rating", choices=["+1", "-1"])
     pf.add_argument("--note", default="")
 
+    pe = sub.add_parser("eval", help="submit, list, or summarize custom evaluation results")
+    pe_sub = pe.add_subparsers(dest="eval_cmd", required=True)
+    pe_submit = pe_sub.add_parser("submit", help="submit one eval result")
+    pe_submit.add_argument("--run-name", required=True, dest="run_name")
+    pe_submit.add_argument("--model", required=True)
+    pe_submit.add_argument("--score", type=float, default=None)
+    pe_submit.add_argument("--pass-fail", choices=["pass", "fail"], default=None, dest="pass_fail")
+    pe_submit.add_argument("--rubric-score", type=float, default=None, dest="rubric_score")
+    pe_submit.add_argument("--llm-judge-score", type=float, default=None, dest="llm_judge_score")
+    pe_submit.add_argument("--samples", type=int, default=0)
+    pe_submit.add_argument("--dataset", default=None)
+    pe_submit.add_argument("--version", default=None)
+    pe_submit.add_argument("--source", default=None)
+    pe_submit.add_argument("--tags", default=None)
+    pe_submit.add_argument("--use-case", choices=["chat", "coding", "sensitive", "thinking"], default=None, dest="use_case")
+
+    pe_list = pe_sub.add_parser("list", help="list eval results")
+    pe_list.add_argument("--run-name", default=None, dest="run_name")
+    pe_list.add_argument("--model", default=None)
+    pe_list.add_argument("--dataset", default=None)
+    pe_list.add_argument("--source", default=None)
+    pe_list.add_argument("--tags", default=None)
+    pe_list.add_argument("--use-case", choices=["chat", "coding", "sensitive", "thinking"], default=None, dest="use_case")
+    pe_list.add_argument("--window", default=None)
+
+    pe_summary = pe_sub.add_parser("summary", help="summarize eval results")
+    pe_summary.add_argument("--window", default=None)
+
     sub.add_parser("tray", help="launch the macOS menu-bar tray app (live perf/spend/models; "
                    "requires: pip install mrouter[tray])")
 
@@ -292,7 +397,8 @@ def main(argv=None):
           "scan": cmd_scan, "suggest": cmd_suggest, "bench": cmd_bench,
           "classify": cmd_classify, "learn": cmd_learn,
           "stats": cmd_stats, "reliability": cmd_reliability,
-          "classifier-reliability": cmd_classifier_reliability, "tray": cmd_tray}[args.cmd]
+          "classifier-reliability": cmd_classifier_reliability, "tray": cmd_tray,
+          "eval": cmd_eval}[args.cmd]
     return fn(args)
 
 
