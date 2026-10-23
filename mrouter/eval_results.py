@@ -167,7 +167,7 @@ def submit_result(config, run_name, model_key, score=None,
 
 def query_results(config, run_name=None, model_key=None, dataset=None,
                   source=None, tags=None, since_ts=None, window_seconds=None,
-                  use_case=None, now=None):
+                  use_case=None, now=None, version=None):
     """Query eval results with optional filters.
 
     Returns a list of result dicts, oldest first.
@@ -210,6 +210,10 @@ def query_results(config, run_name=None, model_key=None, dataset=None,
             if use_case is not None:
                 clauses.append("use_case = ?")
                 params.append(use_case)
+
+            if version is not None:
+                clauses.append("version = ?")
+                params.append(version)
 
             if window_seconds is not None:
                 if now is None:
