@@ -403,13 +403,45 @@ class Handler(BaseHTTPRequestHandler):
             summary = metrics_store.window_summary(cfg, window_seconds=live_window_s)
             self._send(200, summary)
             return
-        if self.path.startswith("/v1/metrics"):
+        if self.path.startswith("/v1/metrics") and not self.path.startswith("/v1/metrics/live"):
             qs = self.path.split("?", 1)[1] if "?" in self.path else ""
             params = dict(p.split("=", 1) for p in qs.split("&") if "=" in p)
             window = params.get("window")
             window_s = metrics_store.resolve_window_seconds(cfg, window)
             summary = metrics_store.window_summary(cfg, window_seconds=window_s)
             self._send(200, summary)
+            return
+        if self.path.split("?")[0] in ("/v1/eval/summary",):
+            qs = self.path.split("?", 1)[1] if "?" in self.path else ""
+            params = dict(p.split("=", 1) for p in qs.split("&") if "=" in p)
+            window = params.get("window")
+            from . import eval_results as eval_mod
+            from . import metrics_store as ms_mod
+            window_s = ms_mod.resolve_window_seconds(cfg, window)
+            summary = eval_mod.window_summary(cfg, window_seconds=window_s)
+            self._send(200, summary)
+            return
+        if self.path.split("?")[0] in ("/v1/eval/results",):
+            qs = self.path.split("?", 1)[1] if "?" in self.path else ""
+            params = dict(p.split("=", 1) for p in qs.split("&") if "=" in p)
+            from . import eval_results as eval_mod
+            from . import metrics_store as ms_mod
+            window = params.get("window")
+            window_s = None
+            if window:
+                window_s = ms_mod.resolve_window_seconds(cfg, window)
+            rows = eval_mod.query_results(
+                cfg,
+                run_name=params.get("run_name"),
+                model_key=params.get("model_key"),
+                dataset=params.get("dataset"),
+                source=params.get("source"),
+                tags=params.get("tags"),
+                use_case=params.get("use_case"),
+                version=params.get("version"),
+                window_seconds=window_s,
+            )
+            self._send(200, {"results": rows, "count": len(rows)})
             return
         self._send(404, {"error": "not found"})
 
@@ -448,6 +480,35 @@ class Handler(BaseHTTPRequestHandler):
                 return
             learning.append_feedback(cfg, uc, key, int(rating), body.get("note", ""))
             self._send(200, {"ok": True})
+            return
+
+        if self.path.endswith("/eval/results") or self.path == "/v1/eval/results":
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except Exception:
+                self._send(400, {"error": "invalid JSON"})
+                return
+            from . import eval_results as eval_mod
+            result = eval_mod.submit_result(
+                cfg,
+                run_name=body.get("run_name", "unnamed"),
+                model_key=body.get("model_key") or body.get("model"),
+                score=body.get("score"),
+                pass_fail=body.get("pass_fail"),
+                rubric_score=body.get("rubric_score"),
+                llm_judge_score=body.get("llm_judge_score"),
+                sample_count=body.get("sample_count", 0),
+                dataset=body.get("dataset"),
+                version=body.get("version"),
+                source=body.get("source", "api"),
+                tags=body.get("tags"),
+                use_case=body.get("use_case"),
+            )
+            if result is None:
+                self._send(400, {"error": "eval disabled"})
+                return
+            self._send(200, {"ok": True, "result": result})
             return
 
         if self.path.endswith("/classify"):
