@@ -58,7 +58,8 @@
       "label": "General purpose chat",
       "description": "Everyday assistant chat: fast, pleasant, good instruction following. Latency and cost matter; local is free.",
       "weights": {
-        "speed": 0.23,
+        "speed": 0.153,
+        "ttft": 0.077,
         "capability_chat": 0.23,
         "cost_efficiency": 0.23,
         "multimodal": 0.092,
@@ -76,7 +77,8 @@
         "context": 0.138,
         "cost_efficiency": 0.138,
         "tool_use": 0.092,
-        "speed": 0.092,
+        "speed": 0.061,
+        "ttft": 0.031,
         "params_quality": 0.046,
         "reliability": 0.08
       }
@@ -89,7 +91,8 @@
         "mem_fit": 0.276,
         "cost_efficiency": 0.092,
         "context": 0.092,
-        "speed": 0.092,
+        "speed": 0.061,
+        "ttft": 0.031,
         "privacy": 0.092,
         "reliability": 0.08
       }
@@ -102,7 +105,8 @@
         "context": 0.138,
         "cost_efficiency": 0.138,
         "params_quality": 0.092,
-        "speed": 0.092,
+        "speed": 0.061,
+        "ttft": 0.031,
         "reliability": 0.08
       }
     }

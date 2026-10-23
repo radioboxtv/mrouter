@@ -173,6 +173,45 @@ def _check_learning(config, report):
                      "requests this would indicate autolearn is stuck")
 
 
+def _check_perf_sources(config, report):
+    """How much of routing's speed/TTFT scoring is real measurement (live
+    traffic or bench) vs. a guessed/curated estimate. Not a correctness
+    check -- mrouter always works with estimates -- but it tells a human
+    whether real-world performance is actually driving routing yet, or
+    whether the fleet is still coasting on guesses because there's not
+    enough traffic/bench data yet."""
+    try:
+        from . import discovery
+        fleet = discovery.discover_fleet(config)
+        ranked = heuristics.score_fleet(fleet, config)
+    except Exception as e:
+        report.warn("perf_sources", f"could not compute perf-source mix ({type(e).__name__}: {e})")
+        return
+    seen = {}
+    for r in ranked.values():
+        for row in r.get("models", []):
+            seen[row["key"]] = row
+    if not seen:
+        report.ok("perf_sources", "no eligible models to score yet")
+        return
+    total = len(seen)
+    real = sum(1 for row in seen.values()
+               if row.get("speed_source") in ("live", "bench") or row.get("ttft_source") in ("live", "bench"))
+    live = sum(1 for row in seen.values()
+               if row.get("speed_source") == "live" or row.get("ttft_source") == "live")
+    if real == total:
+        report.ok("perf_sources", f"all {total} model(s) scored on real measurements "
+                   f"({live} on live traffic, {real - live} on bench) -- no guessed speed/TTFT")
+    elif real > 0:
+        report.warn("perf_sources", f"{total - real}/{total} model(s) still scored on guessed "
+                     "speed/TTFT (no live traffic or bench data yet) -- routes fine, but "
+                     "performance isn't ground-truthed for them")
+    else:
+        report.warn("perf_sources", f"all {total} model(s) scored on guessed speed/TTFT -- "
+                     "route some traffic (or run `mrouter bench` for local models) so real "
+                     "performance starts driving routing instead of curated estimates")
+
+
 def _check_config_sanity(config, report):
     problems = []
     for uc, uc_cfg in (config.get("use_cases", {}) or {}).items():
@@ -205,6 +244,7 @@ def run(config=None, verbose=False):
     _check_bench_freshness(config, local_models, report)
     _check_reliability(config, report)
     _check_learning(config, report)
+    _check_perf_sources(config, report)
     _check_config_sanity(config, report)
 
     return report

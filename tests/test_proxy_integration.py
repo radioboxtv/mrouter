@@ -425,6 +425,27 @@ class ProxyIntegrationTest(fx.ConfigIsolatedTestCase):
         self.assertIn("requests", body)
         self.assertIn("spend_total_usd", body)
 
+    def test_routes_endpoint_surfaces_perf_source(self):
+        """/v1/routes must expose speed_source/ttft_source per candidate so
+        clients (dashboard, doctor-style tooling) can tell real measurements
+        from guesses without a separate call."""
+        fleet = fx.standard_fleet()
+        cfg, local_srv, cloud_srv = self._config_with_fakes(fleet)
+        self._patch_fleet(cfg, fleet)
+        srv = self._start_proxy(cfg)
+        port = srv.server_address[1]
+
+        r, body = self._get(port, "/v1/routes")
+        self.assertEqual(r.status, 200)
+        for uc, rr in body["routes"].items():
+            if not rr["top3"]:
+                continue
+            for row in rr["top3"]:
+                self.assertIn("speed_source", row)
+                self.assertIn("ttft_source", row)
+                self.assertIn(row["speed_source"], ("live", "bench", "estimated"))
+                self.assertIn(row["ttft_source"], ("live", "bench", "estimated"))
+
 
 if __name__ == "__main__":
     unittest.main()

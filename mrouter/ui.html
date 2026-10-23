@@ -357,6 +357,15 @@ function ucIcon(uc) {
   return {chat:'💬', coding:'💻', sensitive:'🔒', thinking:'🧠'}[uc] || '⚡';
 }
 
+function perfBadge(source) {
+  // live = ground-truth, bench = measured but synthetic, estimated = guessed.
+  const map = { live: ['●', 'var(--green)', 'live traffic'],
+                bench: ['◐', 'var(--yellow)', 'micro-bench'],
+                estimated: ['○', 'var(--muted)', 'guessed'] };
+  const [dot, color, label] = map[source] || map.estimated;
+  return `<span title="perf: ${label}" style="color:${color};font-size:10px">${dot}</span>`;
+}
+
 function renderRoutes(routes) {
   const el = document.getElementById('routes-grid');
   document.getElementById('routes-loading').style.display = 'none';
@@ -365,7 +374,8 @@ function renderRoutes(routes) {
     const score = r.score ? r.score.toFixed(1) : '–';
     const cost = r.est_cost_usd != null ? `$${(r.est_cost_usd*1000).toFixed(3)}/K req` : 'local $0';
     const top3 = (r.top3 || []).map(m =>
-      `<span class="pill">${m.key.split('/').pop().split(':').pop()} ${m.score.toFixed(0)}</span>`
+      `<span class="pill">${m.key.split('/').pop().split(':').pop()} ${m.score.toFixed(0)} `
+      + `${perfBadge(m.speed_source)}${perfBadge(m.ttft_source)}</span>`
     ).join('');
     return `<div class="route-card">
       <div class="row">
@@ -374,6 +384,7 @@ function renderRoutes(routes) {
           <div class="route-model">${r.best ? r.best.split('/').slice(-2).join('/') : '—'}</div>
           <div class="route-meta">${cost}</div>
           <div class="prov-pills" style="margin-top:8px">${top3}</div>
+          <div class="hint" style="margin-top:4px">● live traffic &nbsp; ◐ micro-bench &nbsp; ○ guessed (speed, then TTFT dot per pill)</div>
         </div>
         <div class="score-ring">${score}</div>
       </div>
@@ -633,7 +644,7 @@ function renderDashModels(summary) {
 
 // ── WEIGHTS PAGE ──────────────────────────────────────────────────────────────
 const COMP_LABELS = {
-  speed:'Speed', capability_chat:'Chat capability', capability_coding:'Coding capability',
+  speed:'Speed', ttft:'TTFT (latency)', capability_chat:'Chat capability', capability_coding:'Coding capability',
   capability_thinking:'Thinking capability', capability_avg:'Avg capability',
   context:'Context window', multimodal:'Multimodal', tool_use:'Tool use',
   mem_fit:'Memory fit', params_quality:'Param quality',

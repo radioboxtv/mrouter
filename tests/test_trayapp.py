@@ -153,8 +153,11 @@ class _FakeRumps:
 
 class TestBuildApp(unittest.TestCase):
     def setUp(self):
+        # Port 0 reserved/unassigned by IANA -- never a real listener, unlike
+        # mrouter's actual default (8730), which could collide with a live
+        # mrouter instance running on the test machine.
         self.config = {
-            "proxy": {"host": "127.0.0.1", "port": 8730},
+            "proxy": {"host": "127.0.0.1", "port": 0},
             "metrics": {"default_window": "1h", "tray_poll_seconds": 10},
         }
 
