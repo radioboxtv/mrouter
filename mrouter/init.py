@@ -7,6 +7,10 @@ decisions (where's my gateway, do I want this running at login, do I want my
 local Hermes Agent pointed at it), and it should take exactly one run.
 
 What it does:
+  0. Install mrouter as a real package (`pip install -e .`) using the
+     interpreter that's actually running `init` right now, and record that
+     interpreter's path so launchd (which gets a bare PATH, no venv/mise
+     context) execs the SAME one instead of a hardcoded guess.
   1. Detect LM Studio (`lms` binary, local server) — no user input needed.
   2. Configure (or confirm) the cloud gateway endpoint + key env var.
   3. Write config.json from config.example.json if missing.
@@ -34,11 +38,47 @@ EXAMPLE_PATH = os.path.join(BASE, "config.example.json")
 LAUNCHD_LABEL = "com.mrouter.serve"
 LAUNCHD_PLIST = os.path.expanduser(f"~/Library/LaunchAgents/{LAUNCHD_LABEL}.plist")
 SERVE_SCRIPT = os.path.join(BASE, "scripts", "serve.sh")
+# Records which python3 interpreter `init` installed mrouter into (see
+# _step_install below), so scripts/serve.sh (launchd, which gets a bare PATH
+# with no venv/mise context) uses the SAME interpreter a human actually
+# `pip install`ed optional deps (rumps) into, instead of a hardcoded guess
+# like the old `/usr/bin/python3` that silently diverged from whatever
+# `python3` resolved to in the user's actual shell.
+PYTHON_RECORD_PATH = os.path.join(BASE, ".mrouter_python")
 # Older/ad-hoc installs used other labels pointing at the same serve.sh; if one
 # of these is already loaded, installing our own on top would start a second
 # `serve` process fighting over the same proxy port. Detected by scanning
 # ProgramArguments for serve.sh rather than guessing every possible label.
 _LAUNCHD_AGENTS_DIR = os.path.expanduser("~/Library/LaunchAgents")
+
+
+def _step_install(non_interactive):
+    """Install mrouter as a real package (`pip install -e .`) using
+    `sys.executable` -- the interpreter actually running `mrouter init` right
+    now, i.e. whatever `python3` resolved to in the user's shell/mise/venv --
+    and record that interpreter's path so launchd (scripts/serve.sh), which
+    gets a bare PATH, execs the SAME interpreter instead of a hardcoded guess.
+
+    This also gives `mrouter` a real console-script entry point (via
+    pyproject.toml's [project.scripts]) so there's no more hand-written
+    ~/.local/bin/mrouter wrapper for anyone to maintain or get out of sync.
+    """
+    print("\n[1/6] Package install")
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-e", BASE, "--quiet"],
+            capture_output=True, text=True, timeout=120, check=True,
+        )
+        with open(PYTHON_RECORD_PATH, "w") as f:
+            f.write(sys.executable)
+        print(f"  installed editable (pip install -e .) with {sys.executable}")
+        print(f"  recorded interpreter -> {PYTHON_RECORD_PATH} (used by scripts/serve.sh under launchd)")
+    except subprocess.CalledProcessError as e:
+        print(f"  pip install -e . failed ({e}); `mrouter` commands still work via "
+              f"`python3 -m mrouter` from {BASE}")
+    except Exception as e:
+        print(f"  skipped ({type(e).__name__}: {e}); `mrouter` commands still work via "
+              f"`python3 -m mrouter` from {BASE}")
 
 
 def _ask(prompt, default=""):
@@ -62,7 +102,7 @@ def _find_lms_bin():
 
 
 def _step_lm_studio(non_interactive):
-    print("\n[1/5] LM Studio")
+    print("\n[2/6] LM Studio")
     lms_bin = _find_lms_bin()
     if lms_bin:
         print(f"  found: {lms_bin}")
@@ -74,7 +114,7 @@ def _step_lm_studio(non_interactive):
 
 
 def _step_config(gateway_url, gateway_key_env, non_interactive):
-    print("\n[2/5] config.json")
+    print("\n[3/6] config.json")
     if os.path.exists(CONFIG_PATH):
         print(f"  already exists: {CONFIG_PATH} (leaving as-is — edit it directly, or "
               "delete it and re-run init to start fresh)")
@@ -138,7 +178,7 @@ def _find_existing_serve_agent():
 
 
 def _step_launchd(skip, non_interactive):
-    print("\n[3/5] Run at login (launchd, macOS)")
+    print("\n[4/6] Run at login (launchd, macOS)")
     if skip:
         print("  skipped (--no-launchd)")
         return
@@ -206,7 +246,7 @@ def _hermes_bin():
 
 
 def _step_hermes(cfg, skip, non_interactive):
-    print("\n[4/5] Hermes Agent integration")
+    print("\n[5/6] Hermes Agent integration")
     if skip:
         print("  skipped (--no-hermes)")
         return
@@ -251,7 +291,7 @@ def _print_hermes_commands(cfg):
 
 
 def _step_doctor(cfg):
-    print("\n[5/5] doctor")
+    print("\n[6/6] doctor")
     from . import doctor as doctor_mod
     from . import discovery
     try:
@@ -267,6 +307,7 @@ def run(gateway_url=None, gateway_key_env=None, skip_launchd=False, skip_hermes=
         non_interactive=False):
     print("mrouter init")
     print("=" * 40)
+    _step_install(non_interactive)
     _step_lm_studio(non_interactive)
     cfg = _step_config(gateway_url, gateway_key_env, non_interactive)
     _step_launchd(skip_launchd, non_interactive)
