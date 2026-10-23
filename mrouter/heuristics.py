@@ -146,11 +146,16 @@ def _speed_score(model, fleet, bench, fam_info, live_perf=None, live_min_samples
         # Real traffic is normalized across the WHOLE fleet (local + cloud
         # together), not split by locality: once we have honest measurements,
         # a fast cloud model and a fast local model are directly comparable,
-        # and that comparison is exactly what routing needs.
-        best = max(
-            (((live_perf or {}).get(m["key"]) or {}).get("tokens_per_sec_p90") or 0)
+        # and that comparison is exactly what routing needs. Only peers that
+        # ALSO clear live_min_samples count toward the normalization "best" --
+        # a thin/noisy single-sample reading elsewhere must not be able to
+        # crush every properly-qualified model's score.
+        qualified = [
+            ((live_perf or {}).get(m["key"]) or {}).get("tokens_per_sec_p90")
             for m in fleet
-        ) or 1
+            if (((live_perf or {}).get(m["key"]) or {}).get("samples") or 0) >= live_min_samples
+        ]
+        best = max((v for v in qualified if v), default=live["tokens_per_sec_p90"])
         return round(100 * live["tokens_per_sec_p90"] / max(best, 1e-9), 1), "live"
     if model.get("is_local"):
         measured = _bench_lookup(bench, model["key"])
@@ -185,9 +190,16 @@ def _ttft_score(model, fleet, bench, live_perf=None, live_min_samples=5):
     if live and (live.get("samples") or 0) >= live_min_samples and live.get("ttft_p90_s") is not None:
         # Same whole-fleet normalization rationale as _speed_score: local vs.
         # cloud TTFT are directly comparable once both are real measurements.
-        ttfts = [((live_perf or {}).get(m["key"]) or {}).get("ttft_p90_s") for m in fleet]
-        ttfts = [t for t in ttfts if t is not None and t > 0]
-        best = min(ttfts) if ttfts else live["ttft_p90_s"]
+        # Same qualification guard too -- only peers that clear
+        # live_min_samples count toward the "best" (lowest) TTFT used to
+        # normalize; an unqualified single-sample outlier must not corrupt it.
+        qualified = [
+            ((live_perf or {}).get(m["key"]) or {}).get("ttft_p90_s")
+            for m in fleet
+            if (((live_perf or {}).get(m["key"]) or {}).get("samples") or 0) >= live_min_samples
+        ]
+        qualified = [t for t in qualified if t is not None and t > 0]
+        best = min(qualified) if qualified else live["ttft_p90_s"]
         return round(100 * best / max(live["ttft_p90_s"], 1e-9), 1), "live"
     if model.get("is_local"):
         measured = _bench_lookup(bench, model["key"])
@@ -294,6 +306,17 @@ def load_bench():
 
 # ---------------------------------------------------------------- scoring engine
 
+def _safe_int(value, default):
+    """Parse an int from a hand-editable config value, degrading to `default`
+    on anything malformed (wrong type, None, unparsable string) instead of
+    raising. This is read on every scored model on every request -- a typo'd
+    or null config value must never be able to take down routing."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _component_scores(model, fleet, config, bench, live_cache, live_perf=None):
     chat_cap, fam, fam_info, chat_src = _resolve_capability(model, config, "chat", live_cache)
     code_cap, _, _, code_src = _resolve_capability(model, config, "coding", live_cache)
@@ -301,7 +324,7 @@ def _component_scores(model, fleet, config, bench, live_cache, live_perf=None):
     capability_source = next((s for s in (chat_src, code_src, think_src) if s != "curated"), "curated")
     notes = (config.get("family_kb", {}).get(fam, {}) or {}).get("notes", "") if fam else ""
     est_cost = providers_mod.estimate_cost_usd(model, REF_INPUT_TOKENS, REF_OUTPUT_TOKENS, REF_CACHED_TOKENS)
-    live_min_samples = int((config.get("metrics", {}) or {}).get("live_speed_min_samples", 5))
+    live_min_samples = _safe_int((config.get("metrics") or {}).get("live_speed_min_samples", 5), default=5)
     speed, speed_source = _speed_score(model, fleet, bench, fam_info, live_perf, live_min_samples)
     ttft, ttft_source = _ttft_score(model, fleet, bench, live_perf, live_min_samples)
     comps = {

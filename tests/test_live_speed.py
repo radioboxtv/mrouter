@@ -87,6 +87,26 @@ class SpeedScoreTestCase(fx.ConfigIsolatedTestCase):
         self.assertEqual(score, 55.0)
         self.assertEqual(source, "estimated")
 
+    def test_thin_sample_peer_does_not_corrupt_normalization_for_others(self):
+        """A single model with a thin (< live_min_samples), noisy live reading
+        must NOT pollute the peer-max/peer-min used to normalize OTHER
+        models' live scores. That peer itself correctly falls back to
+        bench/estimated -- but the broken behavior was including its
+        unqualified reading in the fleet-wide 'best' denominator anyway,
+        silently crushing every properly-qualified model's score."""
+        a = next(m for m in self.fleet if m["is_local"])
+        b = next(m for m in self.fleet if m["is_local"] and m["key"] != a["key"])
+        live_perf = {
+            a["key"]: {"tokens_per_sec_p90": 40.0, "samples": 10},   # qualifies
+            b["key"]: {"tokens_per_sec_p90": 10000.0, "samples": 1},  # thin -- must be excluded from normalization
+        }
+        score, source = heuristics._speed_score(a, self.fleet, bench=None, fam_info={},
+                                                  live_perf=live_perf, live_min_samples=5)
+        self.assertEqual(source, "live")
+        # a is the only qualified live reading -> it must be its own normalization
+        # peer (score 100), not crushed toward ~0 by b's disqualified reading.
+        self.assertEqual(score, 100.0)
+
 
 class TtftScoreTestCase(fx.ConfigIsolatedTestCase):
     def setUp(self):
@@ -136,6 +156,21 @@ class TtftScoreTestCase(fx.ConfigIsolatedTestCase):
         self.assertEqual(score, heuristics.NEUTRAL_PERF_SCORE)
         self.assertEqual(source, "estimated")
 
+    def test_thin_sample_peer_does_not_corrupt_ttft_normalization_for_others(self):
+        """Same corruption bug as speed, mirrored for TTFT: a disqualified
+        (thin-sample) peer's freakishly-fast reading must not become the
+        fleet-wide 'best' denominator for everyone else's live TTFT score."""
+        a = next(m for m in self.fleet if m["is_local"])
+        b = next(m for m in self.fleet if m["is_local"] and m["key"] != a["key"])
+        live_perf = {
+            a["key"]: {"ttft_p90_s": 0.5, "samples": 10},     # qualifies
+            b["key"]: {"ttft_p90_s": 0.0001, "samples": 1},   # thin -- must be excluded
+        }
+        score, source = heuristics._ttft_score(a, self.fleet, bench=None,
+                                                 live_perf=live_perf, live_min_samples=5)
+        self.assertEqual(source, "live")
+        self.assertEqual(score, 100.0)
+
 
 class ComponentScoresIncludeTtftTestCase(fx.ConfigIsolatedTestCase):
     def setUp(self):
@@ -152,6 +187,30 @@ class ComponentScoresIncludeTtftTestCase(fx.ConfigIsolatedTestCase):
         self.assertIn("speed", sources)
         self.assertIn("ttft", sources)
         self.assertIn("capability", sources)
+
+    def test_malformed_live_speed_min_samples_degrades_to_default_not_raise(self):
+        """metrics.live_speed_min_samples is read on every single scored
+        model, on every request -- a hand-edited config with a wrong-typed
+        value (string, null, etc.) must degrade to the documented default,
+        not take down routing by raising out of a hot path."""
+        model = self.fleet[0]
+        live_cache = ("curated", [])
+        for bad_value in ("oops", None, [], {}):
+            cfg = {**self.config, "metrics": {"live_speed_min_samples": bad_value}}
+            comps, notes, est_cost, sources = heuristics._component_scores(
+                model, self.fleet, cfg, bench={}, live_cache=live_cache, live_perf={})
+            self.assertIn("speed", comps)
+            self.assertIn("ttft", comps)
+
+    def test_missing_metrics_block_entirely_degrades_to_default(self):
+        model = self.fleet[0]
+        live_cache = ("curated", [])
+        for bad_metrics in (None, {}):
+            cfg = {**self.config, "metrics": bad_metrics}
+            comps, notes, est_cost, sources = heuristics._component_scores(
+                model, self.fleet, cfg, bench={}, live_cache=live_cache, live_perf={})
+            self.assertIn("speed", comps)
+            self.assertIn("ttft", comps)
 
 
 class ScoreFleetSurfacesPerfSourcesTestCase(fx.ConfigIsolatedTestCase):

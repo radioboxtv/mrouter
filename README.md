@@ -279,7 +279,7 @@ poll interval, window choices, live-sample thresholds).
 python3 -m unittest discover -s tests -v
 ```
 
-194 hermetic tests: scoring, cost math, sensitive-invariant routing, classifier
+199 hermetic tests: scoring, cost math, sensitive-invariant routing, classifier
 shapes (incl. mocked decision models), full proxy integration against in-process fake
 upstreams, config loading, learning bounds, live-rankings behavior
 (slug matching, record mapping, modes, cache/fetch lifecycle), reliability
@@ -287,8 +287,9 @@ scoring, the automatic-maintenance layer (autolearn throttling/forcing,
 autobench staleness detection + dedup, `doctor` report checks), the
 on-device metrics store (windowed percentiles, per-model breakdown, pruning,
 tray-app menu rendering), and real-world-perf scoring (live/bench/estimated
-speed+TTFT provenance for local and cloud models, `doctor`'s perf-source mix
-check).
+speed+TTFT provenance for local and cloud models, whole-fleet normalization
+guards against thin-sample outliers, malformed-config resilience, `doctor`'s
+perf-source mix check).
 
 ## License
 

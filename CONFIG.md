@@ -350,6 +350,15 @@ Both components normalize `live` measurements across the **whole fleet**
 fast cloud model and a genuinely fast local model become directly comparable
 on fact, not on a local-measured-vs-cloud-guessed mismatch.
 
+**Existing `config.json` from before this feature:** if your use-case
+weights don't have a `ttft` entry, the `ttft` component simply contributes
+nothing to scoring (missing weight keys are skipped, not treated as an
+error) — routing still works, it just isn't latency-aware until you add one.
+Copy the `ttft` weight from the matching use case in the current
+`config.example.json` (each use case split its old `speed` weight ~2:1 into
+`speed` + `ttft`, so totals stay ~1.0), or regenerate a fresh config via
+`mrouter init` if you haven't customized yours.
+
 `mrouter tray` launches a macOS menu-bar app showing these metrics (menu-bar
 title: spend + p90 TTFT; dropdown: 1h/24h toggle, KPIs, and an active/recent
 model list with each model's use case(s) — truncated to the first couple of
