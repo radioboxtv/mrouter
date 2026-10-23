@@ -275,6 +275,7 @@ def cmd_eval(args):
             source=args.source,
             tags=args.tags,
             use_case=args.use_case,
+            version=args.version,
             window_seconds=args.window,
         )
         if not rows:
@@ -366,6 +367,7 @@ def main(argv=None):
     pe_list.add_argument("--dataset", default=None)
     pe_list.add_argument("--source", default=None)
     pe_list.add_argument("--tags", default=None)
+    pe_list.add_argument("--version", default=None)
     pe_list.add_argument("--use-case", choices=["chat", "coding", "sensitive", "thinking"], default=None, dest="use_case")
     pe_list.add_argument("--window", default=None)
 

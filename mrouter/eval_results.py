@@ -103,6 +103,9 @@ def submit_result(config, run_name, model_key, score=None,
     if not _enabled(config):
         return None
 
+    if not run_name or not model_key:
+        return None
+
     entry = {
         "ts": ts if ts is not None else time.time(),
         "run_name": run_name,
@@ -238,7 +241,7 @@ def query_results(config, run_name=None, model_key=None, dataset=None,
 
 def window_summary(config, window_seconds, run_name=None, model_key=None,
                    dataset=None, source=None, tags=None, use_case=None,
-                   now=None):
+                   now=None, version=None):
     """Windowed summary of eval results.
 
     Returns aggregated stats over the trailing window_seconds:
@@ -254,7 +257,7 @@ def window_summary(config, window_seconds, run_name=None, model_key=None,
     rows = query_results(
         config, run_name=run_name, model_key=model_key,
         dataset=dataset, source=source, tags=tags,
-        since_ts=since_ts, use_case=use_case,
+        since_ts=since_ts, use_case=use_case, version=version,
     )
 
     run_count = len(set(r["run_name"] for r in rows))
@@ -326,14 +329,14 @@ def window_summary(config, window_seconds, run_name=None, model_key=None,
     }
 
 
-def latest_for_model(config, model_key, window_seconds=None, use_case=None, now=None):
+def latest_for_model(config, model_key, window_seconds=None, use_case=None, now=None, version=None):
     """Latest eval result for a single model, fastest query path.
 
     Returns a single result dict or None.
     """
     rows = query_results(
         config, model_key=model_key, window_seconds=window_seconds,
-        use_case=use_case, now=now,
+        use_case=use_case, now=now, version=version,
     )
     if not rows:
         return None

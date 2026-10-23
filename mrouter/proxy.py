@@ -411,7 +411,7 @@ class Handler(BaseHTTPRequestHandler):
             summary = metrics_store.window_summary(cfg, window_seconds=window_s)
             self._send(200, summary)
             return
-        if self.path.startswith("/v1/eval/summary"):
+        if self.path.split("?")[0] in ("/v1/eval/summary",):
             qs = self.path.split("?", 1)[1] if "?" in self.path else ""
             params = dict(p.split("=", 1) for p in qs.split("&") if "=" in p)
             window = params.get("window")
@@ -421,7 +421,7 @@ class Handler(BaseHTTPRequestHandler):
             summary = eval_mod.window_summary(cfg, window_seconds=window_s)
             self._send(200, summary)
             return
-        if self.path.startswith("/v1/eval/results"):
+        if self.path.split("?")[0] in ("/v1/eval/results",):
             qs = self.path.split("?", 1)[1] if "?" in self.path else ""
             params = dict(p.split("=", 1) for p in qs.split("&") if "=" in p)
             from . import eval_results as eval_mod
@@ -438,6 +438,7 @@ class Handler(BaseHTTPRequestHandler):
                 source=params.get("source"),
                 tags=params.get("tags"),
                 use_case=params.get("use_case"),
+                version=params.get("version"),
                 window_seconds=window_s,
             )
             self._send(200, {"results": rows, "count": len(rows)})
