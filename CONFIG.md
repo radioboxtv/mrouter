@@ -119,6 +119,8 @@ automatically.
 ```json
 "decision": {
   "provider": "auto",
+  "reliability_floor": 0.5,
+  "reliability_min_samples": 5,
   "note": "Which categorizer 'auto' uses: auto (baseten key -> jev key -> local), baseten, jev, local."
 },
 "baseten": {
@@ -145,7 +147,31 @@ free). With a key, prompts are classified by the decision model and the
 calibrated probabilities are blended across use-case rankings;
 `classify_task` never raises — provider failure falls back to local.
 
-## Reliability scoring
+### Classifier circuit breaker
+
+Every Baseten/Jev attempt (success, exception, or an unparseable response —
+all three count) is logged under `type: "classifier_attempt"` in the same
+`route_log.jsonl` used for routing, and scored with the identical
+time-decay/shrinkage math as model reliability
+(`mrouter.reliability.compute_classifier_reliability`), just over a
+`provider` key space (`baseten` | `jev`) instead of model keys.
+
+- **`decision.reliability_floor`** / **`decision.reliability_min_samples`**:
+  same semantics as `routing.reliability_floor`/`reliability_min_samples`
+  below, but for the decision-provider layer. A provider whose recent
+  classifier-attempt success rate falls below the floor over at least
+  `min_samples` attempts is skipped — straight to the next provider in the
+  chain (or local) — **without even attempting the network call**, saving
+  `timeout_seconds` on every request instead of waiting out a dead endpoint
+  each time. Default 0.5 / 5, matching model reliability; `0.0` disables the
+  breaker entirely.
+- Unobserved or thin-sample providers are never skipped — a provider must
+  prove itself unreliable first, same as the model-level floor.
+- `mrouter classifier-reliability` CLI prints the current per-provider table;
+  `mrouter doctor` surfaces a WARN (not a FAIL — the fallback chain still
+  routes traffic) when a breaker is currently open.
+
+## Reliability scoring (routed models)
 
 ```json
 "routing": {

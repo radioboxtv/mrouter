@@ -97,6 +97,29 @@ def _check_classifier(config, report):
         report.ok("classifier", f"active provider: {source}")
 
 
+def _check_classifier_reliability(config, report):
+    """Surface the decision-provider circuit breaker: any provider currently
+    tripped (skipped without a network call) due to a proven-bad recent
+    track record. Distinct from model reliability -- this is about the
+    Baseten/Jev classifier call itself, not the routed model."""
+    stats = reliability_mod.compute_classifier_reliability(config)
+    if not stats:
+        report.ok("classifier_reliability", "no classifier attempts logged yet — nothing to flag")
+        return
+    decision = config.get("decision", {}) or {}
+    floor = float(decision.get("reliability_floor", 0.5))
+    min_n = int(decision.get("reliability_min_samples", 5))
+    tripped = [p for p in stats if reliability_mod.is_below_floor(stats, p, floor=floor, min_samples=min_n)]
+    if tripped:
+        report.warn("classifier_reliability",
+                     f"circuit breaker open for: {', '.join(tripped)} — requests fall through to the "
+                     f"next provider (or local) without paying a network timeout; will retry once "
+                     f"fresh successes push the rate back above {floor:.0%}")
+    else:
+        detail = ", ".join(f"{p}={v['score']}" for p, v in sorted(stats.items()))
+        report.ok("classifier_reliability", f"{len(stats)} provider(s) observed, none tripped ({detail})")
+
+
 def _check_bench_freshness(config, local_models, report):
     bench = heuristics.load_bench()
     max_age_h = float((config.get("bench", {}) or {}).get("max_age_hours", 7 * 24))
@@ -178,6 +201,7 @@ def run(config=None, verbose=False):
     local_models = _check_lm_studio(config, report)
     _check_cloud(config, report)
     _check_classifier(config, report)
+    _check_classifier_reliability(config, report)
     _check_bench_freshness(config, local_models, report)
     _check_reliability(config, report)
     _check_learning(config, report)

@@ -9,12 +9,24 @@ uses Jev probabilities to weight/mix routing instead of a hard label, and gates
 Fallback (no TYPESAFE_API_KEY env and no setec secret): a deterministic local
 classifier — code/reasoning/sensitive keyword scoring + input-length signals.
 Zero cost, no network, keeps the privacy boundary safe by default.
+
+Reliability / circuit breaker: every Baseten/Jev attempt is logged (ok/fail +
+latency) to the same route_log.jsonl as routing requests, under
+type='classifier_attempt'. `classify_task` consults each provider's recent
+reliability (mrouter.reliability.compute_classifier_reliability) before
+calling it — a provider that's been failing consistently (below
+decision.reliability_floor over decision.reliability_min_samples attempts) is
+skipped straight to the next one in the chain, rather than paying its full
+network timeout on every single request only to fail anyway. This mirrors the
+model-reliability floor used for routing decisions (mrouter/reliability.py),
+applied one layer up at the decision-provider level.
 """
 
 import json
 import os
 import re
 import subprocess
+import time
 import urllib.request
 
 USE_CASES = ("chat", "coding", "sensitive", "thinking")
@@ -106,18 +118,69 @@ def _key_from_block(block_cfg):
     return None
 
 
+def _log_classifier_attempt(config, provider, ok, latency_s=None, error=None):
+    """Append a classifier-attempt outcome to the shared route log, feeding
+    mrouter.reliability.compute_classifier_reliability. Best-effort: logging
+    failures must never break classification itself."""
+    try:
+        from . import learning
+        learning.append_log(config, {
+            "type": "classifier_attempt", "provider": provider, "ok": bool(ok),
+            "latency_s": round(latency_s, 3) if latency_s is not None else None,
+            "error": error,
+        })
+    except Exception:
+        pass
+
+
+def _classifier_breaker_tripped(config, provider):
+    """True if `provider` (baseten|jev) has a proven-bad recent track record
+    and should be skipped before paying its network timeout this request.
+
+    Mirrors mrouter.reliability.is_below_floor for models: unobserved or
+    thin-sample providers are never tripped — only a provider with enough
+    recent failed attempts gets skipped. Config knobs live under `decision`
+    (reliability_floor/min_samples), defaulting to the same values as model
+    reliability (0.5 / 5) so classifier circuit-breaking and model
+    reliability floors behave consistently out of the box.
+    """
+    decision = config.get("decision", {}) or {}
+    floor = float(decision.get("reliability_floor", 0.5))
+    min_samples = int(decision.get("reliability_min_samples", 5))
+    if floor <= 0.0:
+        return False
+    try:
+        from . import reliability as reliability_mod
+        stats = reliability_mod.compute_classifier_reliability(config)
+    except Exception:
+        return False
+    return reliability_mod.is_below_floor(stats, provider, floor=floor, min_samples=min_samples)
+
+
 def _attempt_baseten(text, config):
     """Run _baseten_classify if a Baseten key is configured; None otherwise.
-    Errors are swallowed (logged) -> None so callers can fall back."""
+    Errors are swallowed (logged) -> None so callers can fall back.
+    Circuit breaker: skipped (without even trying) if baseten's recent
+    reliability is below floor, saving the timeout on every request."""
     bcfg = config.get("baseten", {}) or {}
     if not bcfg.get("enabled", False):
         return None
     key = _key_from_block(bcfg)
     if not key:
         return None
+    if _classifier_breaker_tripped(config, "baseten"):
+        print("[mrouter] Baseten circuit breaker open (recent failures); "
+              "skipping to next provider without a network call", flush=True)
+        return None
+    started = time.time()
     try:
-        return _baseten_classify(text, config, key)
+        result = _baseten_classify(text, config, key)
+        _log_classifier_attempt(config, "baseten", result is not None, time.time() - started,
+                                 error=None if result is not None else "unparseable response")
+        return result
     except Exception as e:
+        _log_classifier_attempt(config, "baseten", False, time.time() - started,
+                                 error=f"{type(e).__name__}: {e}")
         print(f"[mrouter] Baseten classify failed ({type(e).__name__}); "
               "falling back", flush=True)
         return None
@@ -267,13 +330,21 @@ def classify_task(text, config):
         jcfg = config.get("jev", {}) or {}
         if jcfg.get("enabled", True):
             key = _get_typesafe_key(config)
-            if key:
+            if key and not _classifier_breaker_tripped(config, "jev"):
+                started = time.time()
                 try:
                     result = _jev_classify(text, config, key)
+                    _log_classifier_attempt(config, "jev", result is not None, time.time() - started,
+                                             error=None if result is not None else "unparseable response")
                     if result:
                         return result
                 except Exception as e:
+                    _log_classifier_attempt(config, "jev", False, time.time() - started,
+                                             error=f"{type(e).__name__}: {e}")
                     print(f"[mrouter] Jev classify failed ({type(e).__name__}); using local fallback", flush=True)
+            elif key:
+                print("[mrouter] Jev circuit breaker open (recent failures); "
+                      "skipping to local fallback without a network call", flush=True)
         if provider == "jev":
             return _local_classify(text)
     return _local_classify(text)

@@ -73,6 +73,32 @@ class TestDoctorReport(fx.ConfigIsolatedTestCase):
         # In this hermetic test env no Baseten/Jev key is set -> local fallback -> WARN
         self.assertEqual(clf_rows[0][0], "WARN")
 
+    def test_classifier_reliability_no_attempts_is_ok(self):
+        cfg = self.make_config()
+        with mock.patch("mrouter.discovery.server_alive", return_value=True), \
+             mock.patch("mrouter.discovery.discover_models", return_value=[]), \
+             mock.patch("mrouter.doctor._check_cloud", return_value=[]):
+            report = doctor.run(cfg)
+        rows = [r for r in report.rows if r[1] == "classifier_reliability"]
+        self.assertEqual(rows[0][0], "OK")
+
+    def test_classifier_reliability_tripped_breaker_is_warning_not_failure(self):
+        """A tripped classifier circuit breaker degrades gracefully (fallback
+        chain still routes traffic) -- it's a WARN, not a FAIL, unlike a
+        routed-model reliability floor violation which blocks that model
+        entirely from the pool."""
+        cfg = self.make_config()
+        fake_stats = {"baseten": {"samples": 10, "success_rate": 0.1, "score": 10.0}}
+        with mock.patch("mrouter.discovery.server_alive", return_value=True), \
+             mock.patch("mrouter.discovery.discover_models", return_value=[]), \
+             mock.patch("mrouter.doctor._check_cloud", return_value=[]), \
+             mock.patch("mrouter.reliability.compute_classifier_reliability", return_value=fake_stats):
+            report = doctor.run(cfg)
+        rows = [r for r in report.rows if r[1] == "classifier_reliability"]
+        self.assertEqual(rows[0][0], "WARN")
+        self.assertIn("baseten", rows[0][2])
+        self.assertFalse(report.has_fail)
+
 
 class TestDoctorConfigSanity(fx.ConfigIsolatedTestCase):
     def test_bad_weights_flagged(self):
