@@ -2,6 +2,7 @@
 
 import json
 import os
+import socket
 import threading
 import unittest
 import urllib.request
@@ -22,6 +23,25 @@ class _FakeUpstream(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(length))
         model = body.get("model", "?")
         saw_auth = bool(self.headers.get("Authorization"))
+        if body.get("stream"):
+            # Real OpenAI-compatible SSE upstream: chunked transfer-encoding,
+            # a handful of data: lines, then [DONE]. Mirrors what LM Studio /
+            # Aperture actually send for a streaming chat completion.
+            lines = [
+                'data: {"choices":[{"delta":{"content":"ok "}}]}\n\n',
+                'data: {"choices":[{"delta":{"content":"from ' + model + '"}}],'
+                '"usage":{"prompt_tokens":10,"completion_tokens":2}}\n\n',
+                "data: [DONE]\n\n",
+            ]
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            for line in lines:
+                payload = line.encode()
+                self.wfile.write(f"{len(payload):x}\r\n".encode() + payload + b"\r\n")
+            self.wfile.write(b"0\r\n\r\n")
+            return
         resp = {
             "id": "chatcmpl-test", "object": "chat.completion", "created": 0,
             "model": model,
@@ -216,6 +236,70 @@ class ProxyIntegrationTest(fx.ConfigIsolatedTestCase):
         with open(self.learning.log_path(cfg)) as f:
             entries = [json.loads(l) for l in f]
         self.assertEqual(entries[-1]["status_code"], 500)
+
+    def test_streaming_response_is_valid_http(self):
+        """Regression test: mrouter used to relay the upstream's
+        `Transfer-Encoding: chunked` header verbatim while writing bytes that
+        urllib had ALREADY de-chunked (http.client strips chunk framing before
+        resp.read() returns). That's a protocol violation -- declaring chunked
+        framing while sending a plain byte stream -- that curl/urllib silently
+        tolerate but strict HTTP/1.1 clients correctly reject. Confirmed live
+        against Node's undici (the client Hermes Agent uses): it raised
+        HTTPParserError: "Invalid character in chunk size" on exactly this
+        response shape. This test reproduces the same wire-level check with a
+        raw socket, independent of any particular client library."""
+        fleet = fx.standard_fleet()
+        cfg, local_srv, cloud_srv = self._config_with_fakes(fleet)
+        self._patch_fleet(cfg, fleet)
+        srv = self._start_proxy(cfg)
+        port = srv.server_address[1]
+
+        body = json.dumps({
+            "model": "deepseek/deepseek-v4-flash",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 5, "stream": True,
+        }).encode()
+        request = (
+            b"POST /v1/chat/completions HTTP/1.1\r\n"
+            b"Host: 127.0.0.1\r\n"
+            b"Content-Type: application/json\r\n"
+            b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+            b"Connection: close\r\n"
+            b"\r\n" + body
+        )
+        with socket.create_connection(("127.0.0.1", port), timeout=10) as sock:
+            sock.sendall(request)
+            raw = b""
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                raw += chunk
+
+        head, _, response_body = raw.partition(b"\r\n\r\n")
+        header_lines = head.decode("latin-1").split("\r\n")
+        status_line = header_lines[0]
+        headers = dict(
+            line.split(": ", 1) for line in header_lines[1:] if ": " in line
+        )
+        self.assertIn("200", status_line)
+        # The core bug: never claim chunked framing for a body that isn't
+        # actually chunk-encoded on the wire.
+        te = headers.get("Transfer-Encoding", "")
+        self.assertNotEqual(te.lower(), "chunked",
+                             "response declares Transfer-Encoding: chunked but the "
+                             "proxy does not chunk-encode its output -- this is the "
+                             "exact defect that broke Hermes/undici streaming")
+        # With no Transfer-Encoding and no Content-Length, HTTP/1.0-style framing
+        # (body ends at connection close) is valid -- verify the body we actually
+        # received is the plain SSE text, not chunk-size-prefixed garbage.
+        self.assertIn(b"data:", response_body)
+        self.assertIn(b"[DONE]", response_body)
+        # A chunk-encoded body, misdecoded as plain text, would still contain the
+        # hex chunk-size lines as garbage before each data: line -- make sure
+        # none leaked through.
+        self.assertNotRegex(response_body.decode("latin-1", "replace"),
+                             r"(?m)^[0-9a-f]+\r?\n")
 
 
 if __name__ == "__main__":
