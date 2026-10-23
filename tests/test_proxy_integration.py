@@ -350,6 +350,11 @@ class ProxyIntegrationTest(fx.ConfigIsolatedTestCase):
         self.assertIsNotNone(rows[0]["ttft_s"])
 
     def test_errored_request_writes_metrics_row_with_error_status(self):
+        """With the resilience/fallback feature (merged separately), a
+        'sensitive' request has 2 local candidates (gemma, qwen); pointing
+        lm_studio at a single broken upstream makes BOTH candidates fail, so
+        metrics records one row per attempt -- same per-attempt granularity
+        as learning.append_log, not just the terminal outcome."""
         fleet = fx.standard_fleet()
         cfg, local_srv, cloud_srv = self._config_with_fakes(fleet)
         self._patch_fleet(cfg, fleet)
@@ -382,8 +387,10 @@ class ProxyIntegrationTest(fx.ConfigIsolatedTestCase):
             pass
 
         rows = self.metrics_store.query_window(cfg, since_ts=0)
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["status_code"], 500)
+        # Both local 'sensitive' candidates are broken and attempted (cascade
+        # exhausted), so metrics gets one row per attempt, not one per request.
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(row["status_code"] == 500 for row in rows))
 
     def test_metrics_endpoint_returns_window_summary(self):
         fleet = fx.standard_fleet()
