@@ -14,6 +14,7 @@ local ids go to LM Studio, everything else to Aperture.
 
 import json
 import os
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -31,13 +32,59 @@ class Router:
         self.config = config
         self._fleet = None
         self._fleet_ts = 0.0
+        self._benched_keys = set()  # local model keys we've already kicked a bench job for
+        self._bench_lock = threading.Lock()
 
     def fleet(self):
         now = time.time()
         if self._fleet is None or now - self._fleet_ts > FLEET_TTL_S:
             self._fleet = discovery.discover_fleet(self.config)
             self._fleet_ts = now
+            self._maybe_autobench()
         return self._fleet
+
+    def _maybe_autobench(self):
+        """Background micro-benchmark for any local model missing fresh bench
+        data, so routing speed scores stay accurate with zero manual `mrouter
+        bench` runs. Fully fire-and-forget: dispatched onto its own daemon
+        thread immediately, including the LM-Studio liveness/start check —
+        `fleet()` is called on every request-handling thread, so nothing here
+        may block waiting on a network call or a 60s `lms server start`."""
+        try:
+            max_age_h = float((self.config.get("bench", {}) or {}).get("max_age_hours", 7 * 24))
+            bench = heuristics.load_bench()
+            stale = heuristics.stale_local_models(self._fleet, bench, max_age_hours=max_age_h)
+        except Exception:
+            return
+        with self._bench_lock:
+            todo = [m for m in stale if m["key"] not in self._benched_keys]
+            for m in todo:
+                self._benched_keys.add(m["key"])
+        if not todo:
+            return
+        threading.Thread(target=self._bench_worker, args=(todo,), daemon=True).start()
+
+    def _bench_worker(self, models):
+        """Runs entirely off the request-handling thread: liveness check,
+        best-effort LM Studio start, then the benchmark itself."""
+        try:
+            if not discovery.server_alive(self.config):
+                if not discovery.start_server(self.config):
+                    return  # can't bench without a live LM Studio server; try again next refresh
+            self._run_bench(models)
+        finally:
+            with self._bench_lock:
+                for m in models:
+                    self._benched_keys.discard(m["key"])
+
+    def _run_bench(self, models):
+        from . import bench as bench_mod
+        try:
+            print(f"[mrouter] auto-benchmarking {len(models)} local model(s) in background "
+                  f"({', '.join(m['display_name'] for m in models)})...", flush=True)
+            bench_mod.run_bench(models, self.config)
+        except Exception as e:
+            print(f"[mrouter] auto-bench failed ({type(e).__name__}: {e})", flush=True)
 
     def by_key(self, key):
         return next((m for m in self.fleet() if m["key"] == key), None)
@@ -397,6 +444,15 @@ class Handler(BaseHTTPRequestHandler):
 def serve(config, host=None, port=None):
     host = host or config["proxy"]["host"]
     port = port or config["proxy"]["port"]
+    # Best-effort: bring LM Studio's local server up so local/sensitive routing
+    # works without a human remembering `lms server start` first. This used to
+    # live only in scripts/serve.sh (shell-only, launchd-only); doing it here
+    # means it also happens for `python3 -m mrouter serve` run directly.
+    if not discovery.server_alive(config):
+        print("[mrouter] LM Studio server is down — starting it...", flush=True)
+        if not discovery.start_server(config):
+            print("[mrouter] could not start LM Studio (local/sensitive routing degraded "
+                  "until it's up) — open LM Studio or run: lms server start", flush=True)
     Handler.router = Router(config)
     httpd = ThreadingHTTPServer((host, port), Handler)
     httpd.daemon_threads = True

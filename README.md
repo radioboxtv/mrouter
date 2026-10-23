@@ -38,10 +38,27 @@ pricing moves. mrouter's stance:
 
 ```bash
 git clone https://github.com/radioboxtv/mrouter && cd mrouter
-cp config.example.json config.json   # then point it at your endpoints
-python3 -m mrouter scan              # inventory: local models + catalog + pricing
-python3 -m mrouter serve             # proxy on http://127.0.0.1:8730/v1
+python3 -m mrouter init     # one-time: detect LM Studio, configure the cloud gateway,
+                            # install a launchd agent, wire up Hermes Agent
 ```
+
+That's it — `init` writes `config.json`, installs `mrouter serve` to run at
+login (macOS launchd; adapt `scripts/serve.sh` for systemd/pm2 elsewhere), and
+can point a local Hermes Agent at the proxy automatically. Day-to-day, the
+only command you should need is:
+
+```bash
+python3 -m mrouter doctor   # health check — endpoints, pricing, classifier,
+                            # bench freshness, reliability, autolearn status
+```
+
+Everything else is automatic: `serve` auto-starts LM Studio if it's down,
+auto-benchmarks any local model missing fresh speed data in the background,
+and recomputes learned routing adjustments after every request and every
+piece of feedback — there is no `mrouter learn` or `mrouter bench` step to
+remember. `scan`, `suggest`, `stats`, `reliability`, `classify`, `bench`, and
+`learn` still exist as debug/inspection commands (and `doctor --verbose`
+prints all of them in one pass) but none of them are required maintenance.
 
 Point any OpenAI-compatible client at `http://127.0.0.1:8730/v1` and send the
 use case as the model name — or `auto` to have mrouter classify each prompt:
@@ -66,15 +83,32 @@ Route names:
 
 ## CLI
 
+Day-to-day, this is the whole surface:
+
+```bash
+python3 -m mrouter init      # one-time: config.json, launchd agent, Hermes wiring
+python3 -m mrouter serve     # the proxy — auto-starts LM Studio, auto-benches, auto-learns
+python3 -m mrouter doctor    # health check; the only "maintenance" command
 ```
+
+`feedback` is the one routine human action — teach the router a routing was
+good or bad (adjustments apply immediately, no separate recompute step):
+
+```bash
+python3 -m mrouter feedback <use_case> <model_key> +1|-1   # teach it
+```
+
+Everything below is debug/inspection tooling, not required reading. `doctor
+--verbose` prints all of it in one pass:
+
+```bash
 python3 -m mrouter scan       # inventory: local models + catalog + pricing
 python3 -m mrouter suggest    # ranked recommendations per use case
-python3 -m mrouter bench      # measure local TTFT / tok/s (feeds speed scoring)
-python3 -m mrouter serve      # the proxy (daemon-friendly via serve_forever)
+python3 -m mrouter bench      # force a synchronous re-benchmark now (serve does this automatically)
 python3 -m mrouter classify "your prompt text"   # see the classifier's decision
-python3 -m mrouter feedback <use_case> <model_key> +1|-1   # teach it
-python3 -m mrouter learn      # recompute learned adjustments from the log
+python3 -m mrouter learn      # force an immediate learned.json recompute (serve does this automatically)
 python3 -m mrouter stats      # request counts + actual spend
+python3 -m mrouter reliability  # per-model reliability table
 ```
 
 Inspect a live router: `curl :8730/v1/routes` (best + top 3 per use case),
@@ -105,10 +139,13 @@ with per-model $/M pricing).
 4. **Routing.** Forward to the winner, stream the response back, and log
    use case, model, latency, token usage, and **actual cost** to
    `route_log.jsonl`.
-5. **Learning.** `mrouter learn` aggregates the log (+ your `feedback` entries)
-   into bounded per-(use case, model) adjustments in `learned.json`. ≥5
-   samples before reliability moves a score; feedback counts more than volume;
-   everything is plain JSON you can inspect or reset.
+5. **Learning.** Every logged request and every `feedback` vote automatically
+   recomputes bounded per-(use case, model) adjustments in `learned.json` —
+   `serve` does this in-process (throttled for ordinary traffic, immediate
+   for feedback), so there is no separate step to run. ≥5 samples before
+   reliability moves a score; feedback counts more than volume; everything is
+   plain JSON you can inspect or reset. `mrouter learn` still exists as a
+   manual, forced recompute for scripts or after hand-editing the log.
 
 ## Configuration
 
@@ -141,20 +178,26 @@ by a misconfiguration of weights.
 ## Use with Hermes Agent
 
 mrouter was built alongside [Hermes Agent](https://hermes-agent.nousresearch.com)
-(and any OpenAI client works — Codex, Cline, Aider, your own scripts):
+(and any OpenAI client works — Codex, Cline, Aider, your own scripts).
+`mrouter init` offers to do this for you automatically; the equivalent
+manual commands are:
 
 ```bash
 hermes config set model.provider custom
 hermes config set model.default auto
 hermes config set model.base_url http://127.0.0.1:8730/v1
+hermes fallback add   # keep a cloud model up in case mrouter is down
 ```
 
 Every new Hermes session now classifies its own prompts and picks models
-across your fleet. Keep a cloud fallback so Hermes survives the proxy being
-down (`hermes fallback add`).
+across your fleet. `mrouter doctor` is also the right place to check that
+this integration is still healthy — it reports LM Studio/gateway/classifier
+status that Hermes depends on.
 
-To run mrouter at login (macOS): adapt `scripts/serve.sh` (it also starts LM
-Studio's server if down) in a launchd agent with `KeepAlive`.
+To run mrouter at login (macOS): `mrouter init` writes and loads a launchd
+agent (`~/Library/LaunchAgents/com.mrouter.serve.plist`) pointing at
+`scripts/serve.sh`, with `KeepAlive` so it restarts on crash. Elsewhere,
+adapt `scripts/serve.sh` for systemd/pm2/your init system of choice.
 
 ## What it does not do
 
@@ -181,10 +224,12 @@ curated. See [CONFIG.md](CONFIG.md).
 python3 -m unittest discover -s tests -v
 ```
 
-55 hermetic tests: scoring, cost math, sensitive-invariant routing, classifier
+103 hermetic tests: scoring, cost math, sensitive-invariant routing, classifier
 shapes (incl. mocked decision models), full proxy integration against in-process fake
-upstreams, config loading, learning bounds, and live-rankings behavior
-(slug matching, record mapping, modes, cache/fetch lifecycle).
+upstreams, config loading, learning bounds, live-rankings behavior
+(slug matching, record mapping, modes, cache/fetch lifecycle), reliability
+scoring, and the automatic-maintenance layer (autolearn throttling/forcing,
+autobench staleness detection + dedup, `doctor` report checks).
 
 ## License
 

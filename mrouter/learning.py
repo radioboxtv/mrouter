@@ -1,16 +1,37 @@
 """Route log + learned adjustments: the router gets smarter from observed use.
 
-Every routed request appends one JSON line to route_log.jsonl. `learn`
-aggregates the log + explicit feedback into per-(use_case, model) score
-adjustments in learned.json, applied on top of static heuristic scores.
+Every routed request appends one JSON line to route_log.jsonl. Learned
+adjustments in learned.json are now recomputed automatically — `append_log`
+triggers a throttled recompute and `append_feedback` triggers one
+immediately, so routing improves from real traffic with **zero manual
+steps**. `mrouter learn` still exists for a forced, synchronous recompute
+(useful right after editing the log by hand, or in scripts) but a human
+should never need to run it as part of normal operation.
 Adjustments are bounded so a few bad samples cannot wreck routing.
 """
 
 import json
 import os
+import threading
 import time
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# Throttle for the automatic recompute triggered by ordinary routed-request
+# logging (high volume); feedback always recomputes immediately since it's a
+# low-volume, high-signal human action. Keyed by learned.json path so tests
+# with isolated tmp paths don't bleed state into each other.
+AUTOLEARN_MIN_INTERVAL_S = 5.0
+_last_autolearn = {}
+# serve() runs a ThreadingHTTPServer: multiple request threads can each
+# trigger append_log -> _maybe_autolearn concurrently. json.dump() issues
+# several small writes, not one atomic syscall, so two unsynchronized writers
+# racing on learned.json could interleave and corrupt it. This lock only
+# serializes mrouter's own writers; it does not make the file safe against a
+# concurrent external writer or a crash mid-write (tracked as a broader
+# atomic-write/locking need in issue #15) — it closes the specific new
+# concurrency exposure autolearn introduces.
+_autolearn_lock = threading.Lock()
 
 
 def _path(config, key, default):
@@ -32,6 +53,29 @@ def append_log(config, entry):
     path = log_path(config)
     with open(path, "a") as f:
         f.write(json.dumps(entry) + "\n")
+    _maybe_autolearn(config)
+
+
+def _maybe_autolearn(config, force=False):
+    """Recompute learned.json in-process so routing adapts with no CLI step.
+
+    Throttled to AUTOLEARN_MIN_INTERVAL_S per learned-file path: cheap enough
+    (plain JSON aggregation over a log that's usually small) that recomputing
+    every few seconds under load is a non-issue, and it means the very next
+    request can already use the latest adjustment.
+    """
+    if not (config.get("learning", {}) or {}).get("enabled", True):
+        return
+    key = learned_path(config)
+    now = time.time()
+    if not force and now - _last_autolearn.get(key, 0.0) < AUTOLEARN_MIN_INTERVAL_S:
+        return
+    _last_autolearn[key] = now
+    try:
+        with _autolearn_lock:
+            save_learned(config)
+    except Exception as e:
+        print(f"[mrouter] autolearn failed ({type(e).__name__}: {e}); will retry", flush=True)
 
 
 def load_log(config):
@@ -52,12 +96,18 @@ def load_log(config):
 
 
 def append_feedback(config, use_case, model_key, rating, note=""):
-    """rating: 1 (good) or -1 (bad). Returns the written entry."""
+    """rating: 1 (good) or -1 (bad). Returns the written entry.
+
+    Feedback is low-volume and high-signal (a human just acted), so unlike
+    ordinary request logging it forces an immediate, unthrottled relearn —
+    the very next routed request already reflects it.
+    """
     entry = {
         "type": "feedback", "use_case": use_case, "routed_model_key": model_key,
         "rating": int(rating), "note": note or "", "source": "manual",
     }
     append_log(config, entry)
+    _maybe_autolearn(config, force=True)
     return entry
 
 

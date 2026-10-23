@@ -190,6 +190,27 @@ def _bench_lookup(bench, key):
     return entry if age_h < 7 * 24 else None
 
 
+def stale_local_models(models, bench, max_age_hours: float = 7 * 24):
+    """Local models with no fresh bench entry (missing, failed, or expired).
+
+    Powers automatic background benchmarking in the proxy: `serve` calls this
+    on every fleet refresh so newly-downloaded local models get measured
+    without a human ever running `mrouter bench`.
+    """
+    out = []
+    for m in models:
+        if not m.get("is_local"):
+            continue
+        entry = (bench or {}).get(m["key"])
+        if not entry or not entry.get("tokens_per_sec"):
+            out.append(m)
+            continue
+        age_h = (time.time() - entry.get("ts", 0)) / 3600
+        if age_h >= max_age_hours:
+            out.append(m)
+    return out
+
+
 def load_bench():
     if not os.path.exists(BENCH_PATH):
         return {}
