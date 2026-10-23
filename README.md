@@ -68,8 +68,14 @@ curl http://127.0.0.1:8730/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"auto","messages":[{"role":"user","content":"Refactor this regex…"}],"max_tokens":256}'
 # -> routed to the best coding model; response headers tell you which:
-#    X-Routed-Model, X-Routed-Provider, X-Use-Case, X-Classifier
+#    X-Routed-Model, X-Routed-Provider, X-Use-Case, X-Classifier,
+#    X-Routed-Attempts (present when a retry/fallback happened)
 ```
+
+On a retryable upstream failure (429/5xx/connection error), mrouter retries
+the same model with backoff, then cascades to the next-ranked model — never
+crossing the `sensitive` local-only boundary — instead of failing the
+request outright. See `resilience` in [CONFIG.md](CONFIG.md) to tune it.
 
 Route names:
 

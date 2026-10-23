@@ -26,6 +26,40 @@ FLEET_TTL_S = 30
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.json")
 UI_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui.html")
 
+# Defaults mirror the proposed solution in issue #4: resilient-by-default even
+# for configs written before this feature existed (no "resilience" block).
+_DEFAULT_RETRY_MAX_ATTEMPTS = 2
+_DEFAULT_RETRY_BACKOFF_S = 0.5
+_DEFAULT_RETRY_ON_STATUS = (429, 500, 502, 503, 504)
+_DEFAULT_FALLBACK_ENABLED = True
+_DEFAULT_FALLBACK_MAX_MODELS = 3
+_DEFAULT_CB_FAILURE_THRESHOLD = 5
+_DEFAULT_CB_COOLDOWN_S = 60.0
+_DEFAULT_UPSTREAM_TIMEOUT_S = 600.0
+
+
+def _resilience_cfg(config):
+    """Resolve the resilience policy, defaulting on every missing knob so an
+    old config.json (predating this feature) still gets retry + fallback."""
+    r = config.get("resilience") or {}
+    retry = r.get("retry") or {}
+    fallback = r.get("fallback") or {}
+    cb = r.get("circuit_breaker") or {}
+    try:
+        on_status = {int(s) for s in retry.get("on_status", _DEFAULT_RETRY_ON_STATUS)}
+    except (TypeError, ValueError):
+        on_status = set(_DEFAULT_RETRY_ON_STATUS)
+    return {
+        "max_attempts": max(1, int(retry.get("max_attempts", _DEFAULT_RETRY_MAX_ATTEMPTS))),
+        "backoff_s": max(0.0, float(retry.get("backoff_s", _DEFAULT_RETRY_BACKOFF_S))),
+        "on_status": on_status,
+        "fallback_enabled": bool(fallback.get("enabled", _DEFAULT_FALLBACK_ENABLED)),
+        "max_models": max(1, int(fallback.get("max_models", _DEFAULT_FALLBACK_MAX_MODELS))),
+        "cb_failure_threshold": int(cb.get("failure_threshold", _DEFAULT_CB_FAILURE_THRESHOLD)),
+        "cb_cooldown_s": max(0.0, float(cb.get("cooldown_s", _DEFAULT_CB_COOLDOWN_S))),
+        "timeout_s": max(0.1, float(r.get("upstream_timeout_s", _DEFAULT_UPSTREAM_TIMEOUT_S))),
+    }
+
 
 class Router:
     def __init__(self, config):
@@ -34,6 +68,46 @@ class Router:
         self._fleet_ts = 0.0
         self._benched_keys = set()  # local model keys we've already kicked a bench job for
         self._bench_lock = threading.Lock()
+        # In-process circuit breaker: per-model-key consecutive-failure count
+        # and open-until timestamp. Deliberately separate from the persistent,
+        # log-based reliability floor (heuristics.is_below_floor) -- this one
+        # reacts within a single request burst (no log round-trip needed) and
+        # resets on process restart; the log-based floor is the slower,
+        # durable signal. A failure_threshold of 0 disables the breaker.
+        self._circuit = {}
+        self._circuit_lock = threading.Lock()
+
+    def circuit_is_open(self, key):
+        if not key:
+            return False
+        cfg = _resilience_cfg(self.config)
+        if cfg["cb_failure_threshold"] <= 0:
+            return False
+        with self._circuit_lock:
+            st = self._circuit.get(key)
+            if not st or st.get("opened_at") is None:
+                return False
+            if time.time() - st["opened_at"] >= cfg["cb_cooldown_s"]:
+                return False  # cooldown elapsed: half-open, allow a trial attempt
+            return True
+
+    def record_circuit_success(self, key):
+        if not key:
+            return
+        with self._circuit_lock:
+            self._circuit[key] = {"failures": 0, "opened_at": None}
+
+    def record_circuit_failure(self, key):
+        if not key:
+            return
+        cfg = _resilience_cfg(self.config)
+        if cfg["cb_failure_threshold"] <= 0:
+            return
+        with self._circuit_lock:
+            st = self._circuit.setdefault(key, {"failures": 0, "opened_at": None})
+            st["failures"] += 1
+            if st["failures"] >= cfg["cb_failure_threshold"]:
+                st["opened_at"] = time.time()
 
     def fleet(self):
         now = time.time()
@@ -93,17 +167,51 @@ class Router:
         return next((m for m in self.fleet() if m.get("api_id") == api_id), None)
 
     def pick(self, use_case, bench=None, learned=None):
-        fleet = self.fleet()
-        ranked = heuristics.score_fleet(fleet, self.config, bench, learned)
-        rows = ranked[use_case]["models"]
-        if not rows:
-            return None, None
-        info = rows[0]
-        return self.by_key(info["key"]), info
+        model, info, _ = self.pick_one(use_case, bench, learned)
+        return model, info
+
+    def _ranked_rows(self, use_case, bench=None, learned=None):
+        ranked = heuristics.score_fleet(self.fleet(), self.config, bench, learned)
+        return ranked[use_case]["models"]
+
+    def candidates(self, use_case, bench=None, learned=None, limit=None):
+        """Ordered [(model, info), ...] for `use_case`, best first.
+
+        Models with an open in-process circuit breaker are deprioritized
+        (moved behind every healthy candidate) rather than dropped outright
+        -- if every candidate is currently tripped, retrying the least-broken
+        one beats a hard failure. `limit` caps the list (fallback.max_models).
+        """
+        rows = self._ranked_rows(use_case, bench, learned)
+        healthy = [row for row in rows if not self.circuit_is_open(row["key"])]
+        tripped = [row for row in rows if self.circuit_is_open(row["key"])]
+        ordered = healthy + tripped
+        if limit:
+            ordered = ordered[:limit]
+        out = []
+        for row in ordered:
+            model = self.by_key(row["key"])
+            if model is not None:
+                out.append((model, row))
+        return out
+
+    def pick_one(self, use_case, bench=None, learned=None):
+        cands = self.candidates(use_case, bench, learned, limit=1)
+        if not cands:
+            return None, None, use_case
+        model, info = cands[0]
+        return model, info, use_case
 
 
-def _pick_for_request(router, payload, requested_route):
-    """Resolve (use_case, model, info, classification). Handles 'auto'."""
+def _candidates_for_request(router, payload, requested_route, limit=None):
+    """Resolve (use_case, [(model, info), ...], classification). Handles 'auto'.
+
+    Returns an ORDERED candidate list (best first, up to `limit`) instead of a
+    single pick so the caller can retry/fall back across runner-ups on a
+    retryable upstream failure (issue #4). The hard `sensitive` privacy floor
+    is enforced before any candidate is produced: a sensitive-leaning prompt
+    only ever receives local candidates, never a cloud fallback.
+    """
     route = requested_route
     classification = None
     if route == "auto":
@@ -111,35 +219,43 @@ def _pick_for_request(router, payload, requested_route):
         classification = categorize.classify_task(text, router.config)
         probs = classification["probs"]
         # Privacy floor: if the prompt looks even moderately sensitive, force
-        # the local-only route regardless of which use case scored highest.
+        # the local-only route (and ALL its fallbacks) regardless of which
+        # use case scored highest.
         floor = float((router.config.get("routing", {}) or {}).get(
             "sensitive_probability_floor", 0.25))
         if probs.get("sensitive", 0.0) >= floor:
-            model, info = router.pick("sensitive")
-            return "sensitive", model, info, classification
+            cands = router.candidates("sensitive", limit=limit)
+            return "sensitive", cands, classification
         # Blend: score each candidate model by probability-weighted use-case scores.
         ranked = heuristics.score_fleet(router.fleet(), router.config)
-        best_key, best_blend, best_uc = None, -1, classification["top"]
+        best_uc = classification["top"]
         union = {}
+        row_by_key = {}
         for uc, r in ranked.items():
             for row in r["models"]:
                 union[row["key"]] = union.get(row["key"], 0.0) + probs.get(uc, 0.0) * row["score"]
+                row_by_key.setdefault(row["key"], row)
         if union:
-            best_key = max(union, key=union.get)
             best_uc = max(probs, key=probs.get)
-        model = router.by_key(best_key) if best_key else None
-        info = None
-        if model:
-            for uc, r in ranked.items():
-                for row in r["models"]:
-                    if row["key"] == best_key:
-                        info = {**row, "blended_score": round(union[best_key], 1)}
-                        break
-        return best_uc, model, info, classification
+        healthy_keys = sorted(
+            (k for k in union if not router.circuit_is_open(k)), key=lambda k: -union[k])
+        tripped_keys = sorted(
+            (k for k in union if router.circuit_is_open(k)), key=lambda k: -union[k])
+        ordered_keys = healthy_keys + tripped_keys
+        if limit:
+            ordered_keys = ordered_keys[:limit]
+        cands = []
+        for key in ordered_keys:
+            model = router.by_key(key)
+            if model is None:
+                continue
+            info = {**row_by_key[key], "blended_score": round(union[key], 1)}
+            cands.append((model, info))
+        return best_uc, cands, classification
     if route in router.config["use_cases"]:
-        model, info = router.pick(route)
-        return route, model, info, classification
-    return None, None, None, classification
+        cands = router.candidates(route, limit=limit)
+        return route, cands, classification
+    return None, [], classification
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -295,11 +411,14 @@ class Handler(BaseHTTPRequestHandler):
         route = requested[len("router/"):] if requested.startswith("router/") else requested
 
         started = time.time()
-        use_case, model, info, classification = None, None, None, None
+        rcfg = _resilience_cfg(cfg)
+        use_case, classification = None, None
+        candidates = []  # [(model, info), ...], best first
 
         if route == "auto" or route in cfg["use_cases"]:
-            use_case, model, info, classification = _pick_for_request(r, payload, route)
-            if model is None:
+            use_case, candidates, classification = _candidates_for_request(
+                r, payload, route, limit=rcfg["max_models"] if rcfg["fallback_enabled"] else 1)
+            if not candidates:
                 self._send(503, {"error": f"no eligible model for '{route}'"})
                 return
         else:
@@ -307,68 +426,137 @@ class Handler(BaseHTTPRequestHandler):
             model = r.by_api_id(requested) or r.by_key(requested)
             if model is None:
                 # Unknown id: assume local if LM Studio lists it, else Aperture.
-                local_hit = next((m for m in r.fleet() if m["is_local"] and m["api_id"] == requested), None)
-                model = local_hit
+                model = next((m for m in r.fleet() if m["is_local"] and m["api_id"] == requested), None)
+            candidates = [(model, None)]  # explicit ids never cascade to a different model
 
-        upstream_model_id = model["api_id"] if model else requested
-        is_local = bool(model and model.get("is_local"))
-        # Unknown explicit ids default to Aperture (the broader catalog).
-        if model is None:
-            upstream_base = cfg["providers"]["aperture"]["api_base"]
-            provider_name = "aperture"
-        elif is_local:
-            upstream_base = cfg["lm_studio"]["api_base"]
-            provider_name = "lmstudio"
-        else:
-            upstream_base = cfg["providers"]["aperture"]["api_base"]
-            provider_name = "aperture"
-
-        payload["model"] = upstream_model_id
-        headers = {"Content-Type": "application/json"}
-        if not is_local:
-            key = providers_mod.resolve_provider_key(cfg.get("providers", {}).get("aperture", {}) or {})
-            if self.headers.get("Authorization"):
-                headers["Authorization"] = self.headers["Authorization"]
-            elif key and key != "no-key-required":
-                headers["Authorization"] = f"Bearer {key}"
-        elif self.headers.get("Authorization"):
-            headers["Authorization"] = self.headers["Authorization"]
-
-        upstream_req = urllib.request.Request(
-            upstream_base.rstrip("/") + "/chat/completions",
-            data=json.dumps(payload).encode(), headers=headers, method="POST",
-        )
-
-        extra = {}
-        if use_case:
-            extra["X-Use-Case"] = use_case
-            extra["X-Routed-Model"] = model["key"]
-            extra["X-Routed-Provider"] = provider_name
-            if classification:
-                extra["X-Classifier"] = classification["source"]
-                extra["X-Classifier-Confidence"] = str(classification["confidence"])
-            print(f"[mrouter] route '{route}' -> {model['display_name']} "
-                  f"[{provider_name}] (score {info and info.get('score')}; "
-                  f"est ${info and info.get('est_cost_usd')})", flush=True)
-
+        attempts_log = []  # per-attempt summary, surfaced in X-Routed-Attempts
         stream = bool(payload.get("stream"))
-        try:
-            resp = urllib.request.urlopen(upstream_req, timeout=600)
-        except urllib.error.HTTPError as e:
-            body = e.read()
+
+        for cand_idx, (model, info) in enumerate(candidates):
+            is_last_candidate = cand_idx == len(candidates) - 1
+            upstream_model_id = model["api_id"] if model else requested
+            is_local = bool(model and model.get("is_local"))
+            if model is None:
+                upstream_base = cfg["providers"]["aperture"]["api_base"]
+                provider_name = "aperture"
+            elif is_local:
+                upstream_base = cfg["lm_studio"]["api_base"]
+                provider_name = "lmstudio"
+            else:
+                upstream_base = cfg["providers"]["aperture"]["api_base"]
+                provider_name = "aperture"
+
+            req_payload = dict(payload, model=upstream_model_id)
+            headers = {"Content-Type": "application/json"}
+            if not is_local:
+                key = providers_mod.resolve_provider_key(cfg.get("providers", {}).get("aperture", {}) or {})
+                if self.headers.get("Authorization"):
+                    headers["Authorization"] = self.headers["Authorization"]
+                elif key and key != "no-key-required":
+                    headers["Authorization"] = f"Bearer {key}"
+            elif self.headers.get("Authorization"):
+                headers["Authorization"] = self.headers["Authorization"]
+
+            extra = {}
+            if use_case:
+                extra["X-Use-Case"] = use_case
+                extra["X-Routed-Model"] = model["key"]
+                extra["X-Routed-Provider"] = provider_name
+                if classification:
+                    extra["X-Classifier"] = classification["source"]
+                    extra["X-Classifier-Confidence"] = str(classification["confidence"])
+                print(f"[mrouter] route '{route}' -> {model['display_name']} "
+                      f"[{provider_name}] (score {info and info.get('score')}; "
+                      f"est ${info and info.get('est_cost_usd')}; attempt {cand_idx + 1}/{len(candidates)})",
+                      flush=True)
+
+            # Per-attempt retry-with-backoff loop (retryable statuses only; a
+            # model-level retry stays on the SAME model before cascading to
+            # the next candidate -- matches the proposed policy in issue #4).
+            resp = None
+            last_status = None
+            last_error = None
+            for attempt in range(1, rcfg["max_attempts"] + 1):
+                upstream_req = urllib.request.Request(
+                    upstream_base.rstrip("/") + "/chat/completions",
+                    data=json.dumps(req_payload).encode(), headers=headers, method="POST",
+                )
+                try:
+                    resp = urllib.request.urlopen(upstream_req, timeout=rcfg["timeout_s"])
+                    last_status = resp.status
+                    break
+                except urllib.error.HTTPError as e:
+                    last_status = e.code
+                    last_error = e
+                    retryable = e.code in rcfg["on_status"]
+                    attempts_log.append({"model": model["key"] if model else requested,
+                                          "provider": provider_name, "status": e.code,
+                                          "attempt": attempt, "retryable": retryable})
+                    if retryable and attempt < rcfg["max_attempts"]:
+                        time.sleep(rcfg["backoff_s"] * attempt)
+                        continue
+                    break
+                except Exception as e:
+                    last_status = None
+                    last_error = e
+                    attempts_log.append({"model": model["key"] if model else requested,
+                                          "provider": provider_name, "status": None,
+                                          "error": f"{type(e).__name__}: {e}", "attempt": attempt,
+                                          "retryable": True})
+                    if attempt < rcfg["max_attempts"]:
+                        time.sleep(rcfg["backoff_s"] * attempt)
+                        continue
+                    break
+
+            if resp is not None and last_status is not None and last_status < 400:
+                r.record_circuit_success(model["key"] if model else None)
+                break  # success: stop cascading candidates
+
+            # This candidate exhausted its retries. Record the failure (feeds
+            # both the in-process breaker and the persistent reliability log),
+            # then decide whether to cascade to the next candidate.
+            r.record_circuit_failure(model["key"] if model else None)
+            failure_is_retryable_status = isinstance(last_error, urllib.error.HTTPError) and \
+                last_error.code in rcfg["on_status"]
+            failure_is_connection_error = not isinstance(last_error, urllib.error.HTTPError)
             learning.append_log(cfg, {
                 "type": "request", "use_case": use_case, "requested": requested,
                 "routed_model_key": model["key"] if model else None,
-                "provider": provider_name, "status_code": e.code,
+                "provider": provider_name,
+                "status_code": last_status if last_status is not None else 0,
                 "classifier": classification, "ttft_s": None,
                 "duration_s": round(time.time() - started, 3), "usage": None,
                 "actual_cost_usd": None, "stream": stream,
+                "fallback_attempt": cand_idx + 1, "fallback_total": len(candidates),
             })
-            self._send(e.code, body)
+            should_fallback = (
+                rcfg["fallback_enabled"] and not is_last_candidate and
+                (failure_is_retryable_status or failure_is_connection_error)
+            )
+            if should_fallback:
+                continue  # try the next-ranked candidate
+            # No more candidates, or this failure class isn't fallback-eligible
+            # (e.g. a non-retryable 4xx from the client's own bad request):
+            # surface it exactly as before.
+            if isinstance(last_error, urllib.error.HTTPError):
+                self._send(last_error.code, last_error.read(),
+                           {"X-Routed-Attempts": json.dumps(attempts_log)} if attempts_log else None)
+            else:
+                self._send(502, {"error": str(last_error) if last_error else "upstream unavailable",
+                                  "attempts": attempts_log})
             return
-        except Exception as e:
-            self._send(502, {"error": str(e)})
+        else:
+            # Every candidate was exhausted without a `break` (all failed and
+            # fallback produced no further option) -- defensive, candidates
+            # non-empty is already guaranteed above, but keep this honest.
+            self._send(503, {"error": f"all {len(candidates)} candidate(s) failed for '{route}'",
+                              "attempts": attempts_log})
             return
+
+        if attempts_log:
+            extra["X-Routed-Attempts"] = json.dumps(attempts_log + [
+                {"model": model["key"] if model else requested, "provider": provider_name,
+                 "status": last_status, "attempt": len(attempts_log) + 1, "final": True}])
 
         if stream:
             self.send_response(resp.status)
@@ -431,6 +619,7 @@ class Handler(BaseHTTPRequestHandler):
                 "usage": usage,
                 "actual_cost_usd": providers_mod.actual_cost_usd(model, usage) if model else None,
                 "stream": True,
+                "fallback_attempt": cand_idx + 1, "fallback_total": len(candidates),
             })
         else:
             data = resp.read()
@@ -449,6 +638,7 @@ class Handler(BaseHTTPRequestHandler):
                 "usage": usage,
                 "actual_cost_usd": providers_mod.actual_cost_usd(model, usage) if model else None,
                 "stream": False,
+                "fallback_attempt": cand_idx + 1, "fallback_total": len(candidates),
             })
             self._send(resp.status, data, extra)
 

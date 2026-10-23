@@ -29,6 +29,7 @@ mrouter doctor    # the only "maintenance" command — run it whenever something
 | `proxy` | Listening host/port for the routing proxy |
 | `hardware` | Total RAM (GB) — powers memory-fit scoring |
 | `routing` | Hard eligibility rules (local-only, cloud allowlist, privacy floor) |
+| `resilience` | Retry-with-backoff, cascading fallback to runner-up models, and the in-process circuit breaker |
 | `jev` | Optional Jev (TypeSafe AI) classifier endpoint/auth |
 | `learning` | Feedback & outcome logging, adjustment bounds (recomputed automatically by `serve`) |
 | `rankings` | Optional live rankings prior (Artificial Analysis): mode, key, cache TTL |
@@ -113,6 +114,54 @@ automatically.
 - `sensitive_probability_floor`: in `auto` mode, any prompt whose sensitive
   probability reaches this value is forced onto the local-only route —
   independent of which label "won".
+
+## Resilience: retry, fallback, circuit breaker
+
+```json
+"resilience": {
+  "retry": { "max_attempts": 2, "backoff_s": 0.5, "on_status": [429, 500, 502, 503, 504] },
+  "fallback": { "enabled": true, "max_models": 3 },
+  "circuit_breaker": { "failure_threshold": 5, "cooldown_s": 60 },
+  "upstream_timeout_s": 600
+}
+```
+
+Previously the proxy made exactly one pick and one upstream attempt per
+request: an upstream 5xx/429 or a connection error was surfaced straight to
+the client even when healthy runner-up models were ranked right behind the
+one that failed. This section closes that gap. All keys are optional and
+default to the values shown above — an existing `config.json` written before
+this feature shipped is resilient with zero edits.
+
+- **`retry`**: on a status in `on_status`, the **same** model is retried up
+  to `max_attempts` times, sleeping `backoff_s * attempt` between tries
+  (so 0.5s, then 1.0s, ... at the default). A non-retryable status (e.g. a
+  client's bad-request 400) is never retried. A connection/timeout error is
+  always treated as retryable.
+- **`fallback`**: once a candidate model exhausts its retries, `enabled`
+  controls whether the proxy cascades to the **next-ranked eligible**
+  candidate instead of surfacing the failure, up to `max_models` total model
+  attempts for the request. Eligibility is computed exactly like a normal
+  pick — in particular the **`sensitive` hard local-only filter still
+  applies to every fallback candidate**, so a sensitive request can exhaust
+  every local model and return a clean error, but will never fall back to a
+  cloud model. `auto` mode that lands on `sensitive` via the probability
+  floor gets the same guarantee.
+- **`circuit_breaker`**: an in-process, per-model consecutive-failure
+  counter (resets on process restart; distinct from the persisted, log-based
+  `routing.reliability_floor`). A model with `failure_threshold` or more
+  *consecutive* failures is deprioritized — moved behind every currently
+  healthy candidate in the ranking, not hard-excluded — until `cooldown_s`
+  elapses, after which it gets one "half-open" trial request; a success
+  resets its failure count immediately. `failure_threshold: 0` disables the
+  breaker.
+- **`upstream_timeout_s`**: replaces the old hardcoded `urlopen(..., timeout=600)`.
+- Every attempt (not just the final outcome) is logged as its own
+  `route_log.jsonl` entry (`fallback_attempt`/`fallback_total` fields) so
+  `mrouter reliability`/`learn` see fallback events, not just the request
+  that ultimately succeeded or failed. The full attempt chain for a request
+  is also returned to the client in the `X-Routed-Attempts` response header
+  (JSON array) so callers can see what happened.
 
 ## Decision model (optional, Baseten or Jev)
 
