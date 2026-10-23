@@ -268,7 +268,7 @@ def main(argv=None):
     pf.add_argument("--note", default="")
 
     sub.add_parser("tray", help="launch the macOS menu-bar tray app (live perf/spend/models; "
-                   "requires: python3 -m pip install rumps)")
+                   "requires: pip install mrouter[tray])")
 
     # --- debug/inspection surface: not needed day-to-day; doctor --verbose covers most of this
     ps = sub.add_parser("scan", help="[debug] list discovered local + Aperture models and pricing")

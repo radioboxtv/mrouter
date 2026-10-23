@@ -182,7 +182,7 @@ def main():
     rumps_mod = _try_import_rumps()
     if rumps_mod is None:
         print("mrouter tray requires the 'rumps' package (macOS menu-bar apps).")
-        print("Install it with:  python3 -m pip install rumps")
+        print("Install it with:  pip install mrouter[tray]")
         return 1
     config = discovery.load_config()
     app = build_app(config, rumps_mod)

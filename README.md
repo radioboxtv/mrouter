@@ -38,18 +38,21 @@ pricing moves. mrouter's stance:
 
 ```bash
 git clone https://github.com/radioboxtv/mrouter && cd mrouter
-python3 -m mrouter init     # one-time: detect LM Studio, configure the cloud gateway,
-                            # install a launchd agent, wire up Hermes Agent
+python3 -m mrouter init     # one-time: installs mrouter as a package (`pip install -e .`,
+                            # so `mrouter` works as a plain command afterward), detects
+                            # LM Studio, configures the cloud gateway, installs a launchd
+                            # agent, wires up Hermes Agent
 ```
 
 That's it — `init` writes `config.json`, installs `mrouter serve` to run at
 login (macOS launchd; adapt `scripts/serve.sh` for systemd/pm2 elsewhere), and
-can point a local Hermes Agent at the proxy automatically. Day-to-day, the
-only command you should need is:
+can point a local Hermes Agent at the proxy automatically. After the first
+`init` run, use the plain `mrouter` command (no more `python3 -m`) — day-to-day,
+the only one you should need is:
 
 ```bash
-python3 -m mrouter doctor   # health check — endpoints, pricing, classifier,
-                            # bench freshness, reliability, autolearn status
+mrouter doctor   # health check — endpoints, pricing, classifier,
+                 # bench freshness, reliability, autolearn status
 ```
 
 Everything else is automatic: `serve` auto-starts LM Studio if it's down,
@@ -92,31 +95,36 @@ Route names:
 Day-to-day, this is the whole surface:
 
 ```bash
-python3 -m mrouter init      # one-time: config.json, launchd agent, Hermes wiring
-python3 -m mrouter serve     # the proxy — auto-starts LM Studio, auto-benches, auto-learns
-python3 -m mrouter doctor    # health check; the only "maintenance" command
-python3 -m mrouter tray      # macOS menu-bar app: live perf/spend/models (needs: pip install rumps)
+mrouter init      # one-time: pip-installs mrouter itself, writes config.json,
+                   # launchd agent, Hermes wiring
+mrouter serve     # the proxy — auto-starts LM Studio, auto-benches, auto-learns
+mrouter doctor    # health check; the only "maintenance" command
+mrouter tray      # macOS menu-bar app: live perf/spend/models (needs: pip install mrouter[tray])
 ```
 
 `feedback` is the one routine human action — teach the router a routing was
 good or bad (adjustments apply immediately, no separate recompute step):
 
 ```bash
-python3 -m mrouter feedback <use_case> <model_key> +1|-1   # teach it
+mrouter feedback <use_case> <model_key> +1|-1   # teach it
 ```
 
 Everything below is debug/inspection tooling, not required reading. `doctor
 --verbose` prints all of it in one pass:
 
 ```bash
-python3 -m mrouter scan       # inventory: local models + catalog + pricing
-python3 -m mrouter suggest    # ranked recommendations per use case
-python3 -m mrouter bench      # force a synchronous re-benchmark now (serve does this automatically)
-python3 -m mrouter classify "your prompt text"   # see the classifier's decision
-python3 -m mrouter learn      # force an immediate learned.json recompute (serve does this automatically)
-python3 -m mrouter stats      # request counts + actual spend
-python3 -m mrouter reliability  # per-model reliability table
+mrouter scan       # inventory: local models + catalog + pricing
+mrouter suggest    # ranked recommendations per use case
+mrouter bench      # force a synchronous re-benchmark now (serve does this automatically)
+mrouter classify "your prompt text"   # see the classifier's decision
+mrouter learn      # force an immediate learned.json recompute (serve does this automatically)
+mrouter stats      # request counts + actual spend
+mrouter reliability  # per-model reliability table
 ```
+
+Before running `mrouter init` for the first time, or in any environment where
+you haven't installed the package yet, every command above also works as
+`python3 -m mrouter <command>` from inside the repo checkout.
 
 Inspect a live router: `curl :8730/v1/routes` (best + top 3 per use case),
 `curl :8730/v1/stats` (spend + learned state), `curl :8730/v1/models` (fleet
@@ -248,9 +256,9 @@ audit/learning log). It powers two surfaces over a configurable time window
   and a dropdown with the 1h/24h toggle, KPIs (spend, requests, error rate,
   p90 TTFT, p90 tokens/min), and an active/recent model list. Each model
   shows its use case(s) — truncated to the first couple plus "+N more" for
-  models that serve several. Needs `python3 -m pip install rumps` (the one
-  dependency beyond the stdlib anywhere in mrouter, isolated to this feature);
-  without it, `mrouter tray` prints an install hint and exits.
+  models that serve several. Needs `pip install mrouter[tray]` (installs
+  `rumps`, the one dependency beyond the stdlib anywhere in mrouter, isolated
+  to this feature); without it, `mrouter tray` prints an install hint and exits.
 - **Dashboard tab** in the browser UI at `http://127.0.0.1:8730/ui` — the
   same metrics with more room: a request-volume/error sparkline, a
   reliability table, and a fuller per-model breakdown. No extra dependency.

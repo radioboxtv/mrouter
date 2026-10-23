@@ -9,6 +9,8 @@ aa_cache.json
 metrics.db
 metrics.db-wal
 metrics.db-shm
+.mrouter_python
+*.egg-info/
 __pycache__/
 *.pyc
 .venv/
