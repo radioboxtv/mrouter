@@ -33,7 +33,9 @@
     },
     "classifier_confidence_for_sensitive": 0.55,
     "sensitive_probability_floor": 0.25,
-    "note": "sensitive is a HARD local-only filter, not a weight: cloud models are excluded before scoring. Other use cases multiplex across local + Aperture by score (capability, speed, cost). sensitive_probability_floor: in 'auto', any prompt whose sensitive probability reaches this floor is forced local, regardless of top label."
+    "note": "sensitive is a HARD local-only filter, not a weight: cloud models are excluded before scoring. Other use cases multiplex across local + Aperture by score (capability, speed, cost). sensitive_probability_floor: in 'auto', any prompt whose sensitive probability reaches this floor is forced local, regardless of top label.",
+    "reliability_floor": 0.5,
+    "reliability_min_samples": 5
   },
   "jev": {
     "enabled": true,
@@ -56,48 +58,52 @@
       "label": "General purpose chat",
       "description": "Everyday assistant chat: fast, pleasant, good instruction following. Latency and cost matter; local is free.",
       "weights": {
-        "speed": 0.25,
-        "capability_chat": 0.25,
-        "cost_efficiency": 0.25,
-        "multimodal": 0.1,
-        "context": 0.05,
-        "tool_use": 0.05,
-        "value": 0.05
+        "speed": 0.23,
+        "capability_chat": 0.23,
+        "cost_efficiency": 0.23,
+        "multimodal": 0.092,
+        "context": 0.046,
+        "tool_use": 0.046,
+        "value": 0.046,
+        "reliability": 0.08
       }
     },
     "coding": {
       "label": "Coding",
       "description": "Code generation, refactoring, agentic tool loops. Capability first, then context/tool-use, with a real cost term.",
       "weights": {
-        "capability_coding": 0.45,
-        "context": 0.15,
-        "cost_efficiency": 0.15,
-        "tool_use": 0.1,
-        "speed": 0.1,
-        "params_quality": 0.05
+        "capability_coding": 0.414,
+        "context": 0.138,
+        "cost_efficiency": 0.138,
+        "tool_use": 0.092,
+        "speed": 0.092,
+        "params_quality": 0.046,
+        "reliability": 0.08
       }
     },
     "sensitive": {
       "label": "Local inference on sensitive data",
       "description": "LOCAL ONLY (hard filter). Rank local models by capability, RAM residency (no disk spill), context and speed.",
       "weights": {
-        "capability_avg": 0.3,
-        "mem_fit": 0.3,
-        "cost_efficiency": 0.1,
-        "context": 0.1,
-        "speed": 0.1,
-        "privacy": 0.1
+        "capability_avg": 0.276,
+        "mem_fit": 0.276,
+        "cost_efficiency": 0.092,
+        "context": 0.092,
+        "speed": 0.092,
+        "privacy": 0.092,
+        "reliability": 0.08
       }
     },
     "thinking": {
       "label": "Research and thinking",
       "description": "Long-form reasoning, analysis, research synthesis. Reasoning capability and long context first, cost-aware.",
       "weights": {
-        "capability_thinking": 0.5,
-        "context": 0.15,
-        "cost_efficiency": 0.15,
-        "params_quality": 0.1,
-        "speed": 0.1
+        "capability_thinking": 0.46,
+        "context": 0.138,
+        "cost_efficiency": 0.138,
+        "params_quality": 0.092,
+        "speed": 0.092,
+        "reliability": 0.08
       }
     }
   },

@@ -13,6 +13,7 @@ local ids go to LM Studio, everything else to Aperture.
 """
 
 import json
+import os
 import time
 import urllib.error
 import urllib.request
@@ -21,6 +22,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from . import categorize, discovery, heuristics, learning, providers as providers_mod
 
 FLEET_TTL_S = 30
+CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.json")
+UI_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui.html")
 
 
 class Router:
@@ -113,6 +116,18 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         r = self.router
         cfg = r.config
+        if self.path in ("/", "/ui", "/ui/"):
+            try:
+                with open(UI_PATH, "rb") as f:
+                    body = f.read()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as e:
+                self._send(500, {"error": str(e)})
+            return
         if self.path in ("/health", "/healthz"):
             fleet = r.fleet()
             alive = discovery.server_alive(cfg)
@@ -132,6 +147,18 @@ class Handler(BaseHTTPRequestHandler):
             ids += [{"id": uc, "object": "model"} for uc in cfg["use_cases"]]
             ids.append({"id": "auto", "object": "model"})
             self._send(200, {"object": "list", "data": ids})
+            return
+        if self.path == "/v1/config":
+            try:
+                with open(CONFIG_PATH) as f:
+                    body = json.dumps(json.load(f), indent=2).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as e:
+                self._send(500, {"error": str(e)})
             return
         if self.path == "/v1/routes":
             ranked = heuristics.score_fleet(r.fleet(), cfg)
@@ -162,6 +189,23 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         r = self.router
         cfg = r.config
+
+        if self.path == "/v1/config":
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                new_cfg = json.loads(self.rfile.read(length))
+            except Exception:
+                self._send(400, {"error": "invalid JSON"})
+                return
+            try:
+                with open(CONFIG_PATH, "w") as f:
+                    json.dump(new_cfg, f, indent=2)
+                r.config = new_cfg
+                cfg = new_cfg
+                self._send(200, {"ok": True})
+            except Exception as e:
+                self._send(500, {"error": str(e)})
+            return
 
         if self.path.endswith("/feedback"):
             length = int(self.headers.get("Content-Length") or 0)
@@ -356,6 +400,7 @@ def serve(config, host=None, port=None):
     Handler.router = Router(config)
     httpd = ThreadingHTTPServer((host, port), Handler)
     httpd.daemon_threads = True
+    httpd.request_queue_size = 32  # raise from default 5 — Hermes fires parallel aux/main/subagent calls
     fleetsz = len(Handler.router.fleet())
     print(f"[mrouter] multiplexing proxy on http://{host}:{port}/v1 "
           f"({fleetsz} models: LM Studio local + Aperture)", flush=True)

@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mrouter · providers</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0e1117; --surface: #161b22; --surface2: #21262d;
+    --border: #30363d; --text: #e6edf3; --muted: #8b949e;
+    --accent: #58a6ff; --green: #3fb950; --red: #f85149;
+    --yellow: #d29922; --radius: 8px; --mono: 'SF Mono', ui-monospace, monospace;
+  }
+
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+         background: var(--bg); color: var(--text); min-height: 100vh; }
+
+  header { padding: 20px 24px; border-bottom: 1px solid var(--border);
+           display: flex; align-items: center; gap: 12px; }
+  header h1 { font-size: 18px; font-weight: 600; }
+  header .sub { color: var(--muted); font-size: 13px; margin-top: 1px; }
+  .badge { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 12px;
+           background: var(--surface2); color: var(--muted); border: 1px solid var(--border); }
+  .badge.ok { background: rgba(63,185,80,.15); color: var(--green); border-color: rgba(63,185,80,.3); }
+  .badge.err { background: rgba(248,81,73,.15); color: var(--red); border-color: rgba(248,81,73,.3); }
+
+  nav { display: flex; gap: 0; border-bottom: 1px solid var(--border);
+        padding: 0 24px; overflow-x: auto; }
+  .tab { padding: 10px 16px; font-size: 13px; cursor: pointer; color: var(--muted);
+         border-bottom: 2px solid transparent; white-space: nowrap; transition: color .15s; }
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+  .page { display: none; padding: 24px; max-width: 900px; }
+  .page.active { display: block; }
+
+  h2 { font-size: 15px; font-weight: 600; margin-bottom: 16px; }
+  h3 { font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase;
+       letter-spacing: .04em; margin-bottom: 10px; }
+
+  .card { background: var(--surface); border: 1px solid var(--border);
+          border-radius: var(--radius); padding: 16px; margin-bottom: 12px; }
+  .card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+  .card-head .name { font-weight: 600; font-size: 14px; }
+  .card-head .provider-tag { font-size: 11px; color: var(--muted); background: var(--surface2);
+                              border: 1px solid var(--border); border-radius: 4px;
+                              padding: 1px 6px; font-family: var(--mono); }
+
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .grid.tri { grid-template-columns: 1fr 1fr 1fr; }
+
+  label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  input, select, textarea {
+    width: 100%; background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 6px; color: var(--text); padding: 7px 10px; font-size: 13px;
+    font-family: inherit; outline: none; transition: border-color .15s;
+  }
+  input:focus, select:focus, textarea:focus { border-color: var(--accent); }
+  textarea { resize: vertical; min-height: 70px; font-family: var(--mono); font-size: 12px; }
+  input[type=range] { padding: 0; accent-color: var(--accent); cursor: pointer; }
+  .hint { font-size: 11px; color: var(--muted); margin-top: 3px; }
+
+  .btn { padding: 7px 14px; border-radius: 6px; font-size: 13px; font-weight: 500;
+         border: none; cursor: pointer; transition: opacity .15s; }
+  .btn:hover { opacity: .85; }
+  .btn-primary { background: var(--accent); color: #0d1117; }
+  .btn-ghost { background: var(--surface2); color: var(--text); border: 1px solid var(--border); }
+  .btn-danger { background: rgba(248,81,73,.2); color: var(--red); border: 1px solid rgba(248,81,73,.3); }
+  .btn-sm { padding: 4px 10px; font-size: 12px; }
+
+  .row { display: flex; align-items: center; gap: 8px; }
+  .spacer { flex: 1; }
+
+  .sep { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
+
+  /* provider list */
+  .prov-item { background: var(--surface); border: 1px solid var(--border);
+               border-radius: var(--radius); padding: 14px 16px;
+               display: flex; align-items: flex-start; gap: 12px; margin-bottom: 8px; }
+  .prov-icon { width: 32px; height: 32px; border-radius: 6px; background: var(--surface2);
+               display: flex; align-items: center; justify-content: center;
+               font-size: 16px; flex-shrink: 0; border: 1px solid var(--border); }
+  .prov-body { flex: 1; min-width: 0; }
+  .prov-name { font-weight: 600; font-size: 13px; }
+  .prov-url { font-size: 12px; color: var(--muted); font-family: var(--mono);
+              white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .prov-pills { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; }
+  .pill { font-size: 11px; padding: 1px 6px; border-radius: 10px;
+          background: var(--surface2); color: var(--muted); border: 1px solid var(--border); }
+
+  /* reliability bars */
+  .rel-bar { height: 6px; border-radius: 3px; background: var(--surface2); overflow: hidden; margin-top: 4px; }
+  .rel-fill { height: 100%; border-radius: 3px; transition: width .4s; }
+
+  /* routes grid */
+  .route-card { background: var(--surface); border: 1px solid var(--border);
+                border-radius: var(--radius); padding: 14px 16px; margin-bottom: 8px; }
+  .route-label { font-size: 11px; font-weight: 600; text-transform: uppercase;
+                 letter-spacing: .05em; color: var(--muted); }
+  .route-model { font-size: 14px; font-weight: 600; margin-top: 4px; }
+  .route-meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .score-ring { font-size: 22px; font-weight: 700; color: var(--accent); min-width: 50px; text-align: right; }
+
+  .toast { position: fixed; bottom: 24px; right: 24px; background: var(--surface);
+           border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px;
+           font-size: 13px; transform: translateY(80px); opacity: 0;
+           transition: all .3s; pointer-events: none; z-index: 999; }
+  .toast.show { transform: translateY(0); opacity: 1; }
+  .toast.ok { border-color: rgba(63,185,80,.5); }
+  .toast.err { border-color: rgba(248,81,73,.5); }
+
+  .new-prov-form { background: var(--surface); border: 2px dashed var(--border);
+                   border-radius: var(--radius); padding: 20px; margin-bottom: 16px; display: none; }
+  .new-prov-form.open { display: block; }
+
+  .template-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 8px; margin-bottom: 16px; }
+  .tpl { background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+         padding: 10px 12px; cursor: pointer; transition: border-color .15s; }
+  .tpl:hover { border-color: var(--accent); }
+  .tpl .icon { font-size: 20px; margin-bottom: 4px; }
+  .tpl .name { font-size: 12px; font-weight: 600; }
+  .tpl .desc { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+  .mono { font-family: var(--mono); }
+
+  pre { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px;
+        padding: 16px; font-family: var(--mono); font-size: 12px; overflow-x: auto;
+        white-space: pre-wrap; word-break: break-word; }
+
+  #json-raw { width: 100%; background: var(--surface2); border: 1px solid var(--border);
+              border-radius: 8px; color: var(--text); font-family: var(--mono);
+              font-size: 12px; padding: 14px; min-height: 420px; outline: none;
+              resize: vertical; transition: border-color .15s; }
+  #json-raw:focus { border-color: var(--accent); }
+  .json-toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+
+  /* status dots */
+  .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .dot.green { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .dot.red { background: var(--red); }
+  .dot.grey { background: var(--muted); }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <div class="row">
+      <h1>mrouter</h1>
+      <span class="badge" id="proxy-badge">…</span>
+    </div>
+    <div class="sub">Model routing configuration</div>
+  </div>
+</header>
+
+<nav>
+  <div class="tab active" onclick="showTab('routes')">Routes</div>
+  <div class="tab" onclick="showTab('providers')">Providers</div>
+  <div class="tab" onclick="showTab('weights')">Use-case weights</div>
+  <div class="tab" onclick="showTab('json')">JSON editor</div>
+</nav>
+
+<!-- ROUTES -->
+<div class="page active" id="tab-routes">
+  <h2>Current routing decisions</h2>
+  <div id="routes-loading" class="hint">Loading…</div>
+  <div id="routes-grid"></div>
+  <hr class="sep">
+  <h2>Reliability (from route log)</h2>
+  <div id="reliability-list" class="hint">Loading…</div>
+</div>
+
+<!-- PROVIDERS -->
+<div class="page" id="tab-providers">
+  <div class="row" style="margin-bottom:16px">
+    <h2 style="margin:0">Configured providers</h2>
+    <div class="spacer"></div>
+    <button class="btn btn-primary btn-sm" onclick="toggleNewForm()">+ Add provider</button>
+  </div>
+
+  <!-- new-provider form -->
+  <div class="new-prov-form" id="new-prov-form">
+    <h3 style="margin-bottom:12px">Quick templates</h3>
+    <div class="template-grid" id="template-grid"></div>
+
+    <hr class="sep">
+    <div class="grid tri" style="gap:10px; margin-bottom:10px">
+      <div>
+        <label>Provider name *</label>
+        <input id="np-name" placeholder="my-gateway" spellcheck="false">
+      </div>
+      <div>
+        <label>Base URL *</label>
+        <input id="np-url" placeholder="https://your-gateway.example.com/v1" spellcheck="false">
+      </div>
+      <div>
+        <label>API key env var</label>
+        <input id="np-env" placeholder="MY_GATEWAY_API_KEY" spellcheck="false">
+      </div>
+    </div>
+    <div class="grid" style="margin-bottom:10px">
+      <div>
+        <label>Default model ID</label>
+        <input id="np-model" placeholder="provider/model-name" spellcheck="false">
+      </div>
+      <div>
+        <label>Notes</label>
+        <input id="np-note" placeholder="Optional notes">
+      </div>
+    </div>
+    <div class="row">
+      <button class="btn btn-primary btn-sm" onclick="addProvider()">Add provider</button>
+      <button class="btn btn-ghost btn-sm" onclick="toggleNewForm()">Cancel</button>
+      <span class="hint spacer" id="np-msg"></span>
+    </div>
+  </div>
+
+  <div id="providers-list"></div>
+</div>
+
+<!-- WEIGHTS -->
+<div class="page" id="tab-weights">
+  <h2>Use-case scoring weights</h2>
+  <p class="hint" style="margin-bottom:20px">Drag sliders to adjust. Values are re-normalised to 1.0 on save. Changes write to the config.json watched by the running proxy (restart not required — fleet rescores on next request).</p>
+  <div id="weights-form"></div>
+  <div class="row" style="margin-top:16px">
+    <button class="btn btn-primary" onclick="saveWeights()">Save weights</button>
+    <button class="btn btn-ghost" onclick="loadWeights()">Reset</button>
+  </div>
+</div>
+
+<!-- JSON editor -->
+<div class="page" id="tab-json">
+  <div class="json-toolbar">
+    <h2 style="margin:0">config.json</h2>
+    <div class="spacer"></div>
+    <button class="btn btn-ghost btn-sm" onclick="refreshJson()">↺ Reload</button>
+    <button class="btn btn-primary btn-sm" onclick="saveJson()">Save</button>
+  </div>
+  <p class="hint" style="margin-bottom:10px">Direct JSON editor. Validated before save. machine-local config (not tracked by git).</p>
+  <textarea id="json-raw" spellcheck="false"></textarea>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const API = '';  // proxy is on same origin
+
+// ── TABS ──────────────────────────────────────────────────────────────────────
+function showTab(id) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelector(`.tab[onclick="showTab('${id}')"]`).classList.add('active');
+  document.getElementById('tab-' + id).classList.add('active');
+  if (id === 'routes') loadRoutes();
+  if (id === 'providers') loadProviders();
+  if (id === 'weights') loadWeights();
+  if (id === 'json') refreshJson();
+}
+
+// ── TOAST ─────────────────────────────────────────────────────────────────────
+function toast(msg, kind='ok') {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.className = 'toast ' + kind + ' show';
+  clearTimeout(t._t); t._t = setTimeout(() => t.classList.remove('show'), 2800);
+}
+
+// ── PROXY HEALTH ──────────────────────────────────────────────────────────────
+async function checkHealth() {
+  try {
+    const r = await fetch(API + '/health'); const d = await r.json();
+    const b = document.getElementById('proxy-badge');
+    b.textContent = d.ok ? `✓ proxy up  ·  ${d.fleet?.local ?? '?'} local  ${d.fleet?.aperture ?? '?'} cloud` : '⚠ LM Studio down';
+    b.className = 'badge ' + (d.ok ? 'ok' : 'err');
+  } catch { document.getElementById('proxy-badge').textContent = '✗ proxy unreachable'; document.getElementById('proxy-badge').className = 'badge err'; }
+}
+
+// ── CONFIG (GET/POST to proxy /config) ────────────────────────────────────────
+async function getConfig() {
+  const r = await fetch(API + '/v1/config');
+  if (!r.ok) throw new Error('Config fetch failed ' + r.status);
+  return r.json();
+}
+async function putConfig(cfg) {
+  const r = await fetch(API + '/v1/config', { method: 'POST',
+    headers: {'Content-Type': 'application/json'}, body: JSON.stringify(cfg, null, 2) });
+  if (!r.ok) { const e = await r.text(); throw new Error(e); }
+  return r.json();
+}
+
+// ── ROUTES PAGE ───────────────────────────────────────────────────────────────
+async function loadRoutes() {
+  try {
+    const [routes, stats] = await Promise.all([
+      fetch(API + '/v1/routes').then(r=>r.json()),
+      fetch(API + '/v1/stats').then(r=>r.json()).catch(()=>({}))
+    ]);
+    renderRoutes(routes);
+    renderReliability(stats);
+  } catch(e) { document.getElementById('routes-grid').innerHTML = `<p class="hint" style="color:var(--red)">${e}</p>`; }
+}
+
+function ucIcon(uc) {
+  return {chat:'💬', coding:'💻', sensitive:'🔒', thinking:'🧠'}[uc] || '⚡';
+}
+
+function renderRoutes(routes) {
+  const el = document.getElementById('routes-grid');
+  document.getElementById('routes-loading').style.display = 'none';
+  if (!routes.routes) { el.innerHTML = '<p class="hint">No route data</p>'; return; }
+  el.innerHTML = Object.entries(routes.routes).map(([uc, r]) => {
+    const score = r.score ? r.score.toFixed(1) : '–';
+    const cost = r.est_cost_usd != null ? `$${(r.est_cost_usd*1000).toFixed(3)}/K req` : 'local $0';
+    const top3 = (r.top3 || []).map(m =>
+      `<span class="pill">${m.key.split('/').pop().split(':').pop()} ${m.score.toFixed(0)}</span>`
+    ).join('');
+    return `<div class="route-card">
+      <div class="row">
+        <div>
+          <div class="route-label">${ucIcon(uc)} ${uc}</div>
+          <div class="route-model">${r.best ? r.best.split('/').slice(-2).join('/') : '—'}</div>
+          <div class="route-meta">${cost}</div>
+          <div class="prov-pills" style="margin-top:8px">${top3}</div>
+        </div>
+        <div class="score-ring">${score}</div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function renderReliability(stats) {
+  const el = document.getElementById('reliability-list');
+  const adjs = stats.learned_adjustments || {};
+  if (!Object.keys(adjs).length) { el.innerHTML = '<p class="hint">No reliability data yet — routes will be logged as they run.</p>'; return; }
+  const rows = Object.entries(adjs).map(([k, v]) => {
+    const [uc, model] = k.split('|');
+    const pct = v.success_rate != null ? Math.round(v.success_rate * 100) : null;
+    const color = pct == null ? 'var(--muted)' : pct >= 90 ? 'var(--green)' : pct >= 60 ? 'var(--yellow)' : 'var(--red)';
+    const bar = pct != null ? `<div class="rel-bar" style="margin-top:6px"><div class="rel-fill" style="width:${pct}%;background:${color}"></div></div>` : '';
+    return `<div class="card">
+      <div class="row">
+        <div style="flex:1">
+          <div class="row" style="gap:6px"><span class="pill">${uc}</span> <span class="mono" style="font-size:12px">${model.split('/').pop()}</span></div>
+          <div class="hint" style="margin-top:4px">samples=${v.samples ?? '?'} adj=${v.adj>0?'+':''}${(v.adj||0).toFixed(1)} cost=$${(v.total_cost_usd||0).toFixed(4)}</div>
+          ${bar}
+        </div>
+        <div style="font-size:20px;font-weight:700;color:${color};min-width:44px;text-align:right">${pct != null ? pct+'%' : '?'}</div>
+      </div>
+    </div>`;
+  });
+  el.innerHTML = rows.join('');
+}
+
+// ── PROVIDERS PAGE ────────────────────────────────────────────────────────────
+const TEMPLATES = [
+  { icon:'🌐', name:'OpenAI-compatible', desc:'Any /v1 endpoint', url:'https://your-gateway/v1', env:'API_KEY', model:'' },
+  { icon:'🦙', name:'LM Studio', desc:'Local, no auth', url:'http://localhost:1234/v1', env:'', model:'' },
+  { icon:'🌊', name:'Aperture', desc:'Priced cloud gateway', url:'https://your-aperture.ts.net/v1', env:'APERTURE_API_KEY', model:'' },
+  { icon:'🤖', name:'Ollama', desc:'Local Ollama server', url:'http://localhost:11434/v1', env:'', model:'' },
+  { icon:'🚀', name:'Baseten', desc:'Decision models', url:'https://inference.baseten.co/v1/systemone', env:'BASETEN_API_KEY', model:'decision-models/baseten-mammoth-27b-latest' },
+  { icon:'🔷', name:'Custom', desc:'Anything else', url:'', env:'', model:'' },
+];
+
+function renderTemplates() {
+  document.getElementById('template-grid').innerHTML = TEMPLATES.map((t,i) =>
+    `<div class="tpl" onclick="applyTemplate(${i})">
+      <div class="icon">${t.icon}</div>
+      <div class="name">${t.name}</div>
+      <div class="desc">${t.desc}</div>
+    </div>`).join('');
+}
+
+function applyTemplate(i) {
+  const t = TEMPLATES[i];
+  document.getElementById('np-name').value = t.name.toLowerCase().replace(/[^a-z0-9]/g,'-');
+  document.getElementById('np-url').value = t.url;
+  document.getElementById('np-env').value = t.env;
+  document.getElementById('np-model').value = t.model;
+  document.getElementById('np-name').focus();
+}
+
+let _providersCache = null;
+async function loadProviders() {
+  try {
+    const cfg = await getConfig();
+    _providersCache = cfg;
+    renderProviders(cfg);
+  } catch(e) { document.getElementById('providers-list').innerHTML = `<p class="hint" style="color:var(--red)">${e}</p>`; }
+}
+
+function renderProviders(cfg) {
+  const provs = cfg.providers || {};
+  const lms = cfg.lm_studio ? [['lmstudio', { label:'LM Studio (local)', api_base: cfg.lm_studio.api_base, note:'Always active — local models via lms CLI', _readonly: true }]] : [];
+  const all = [...lms, ...Object.entries(provs)];
+  if (!all.length) { document.getElementById('providers-list').innerHTML = '<p class="hint">No providers configured.</p>'; return; }
+  document.getElementById('providers-list').innerHTML = all.map(([k, p]) => {
+    const url = p.api_base || p.api || '';
+    const rdonly = p._readonly;
+    return `<div class="prov-item">
+      <div class="prov-icon">${providerIcon(k)}</div>
+      <div class="prov-body">
+        <div class="row">
+          <span class="prov-name">${p.label || k}</span>
+          ${rdonly ? '<span class="pill">built-in</span>' : ''}
+        </div>
+        <div class="prov-url">${url}</div>
+        <div class="prov-pills">
+          ${p.api_key_env ? `<span class="pill">🔑 ${p.api_key_env}</span>` : p.api_key && p.api_key !== 'no-key-required' ? '<span class="pill">🔑 static key</span>' : '<span class="pill">no auth</span>'}
+          ${p.default_model || p.model ? `<span class="pill">⚡ ${p.default_model || p.model}</span>` : ''}
+        </div>
+      </div>
+      ${rdonly ? '' : `<button class="btn btn-danger btn-sm" onclick="removeProvider('${k}')">Remove</button>`}
+    </div>`;
+  }).join('');
+}
+
+function providerIcon(k) {
+  if (k.includes('aperture')) return '🌊';
+  if (k.includes('lmstudio') || k.includes('lms')) return '🦙';
+  if (k.includes('ollama')) return '🤖';
+  if (k.includes('baseten')) return '🚀';
+  return '🌐';
+}
+
+function toggleNewForm() {
+  const f = document.getElementById('new-prov-form');
+  f.classList.toggle('open');
+  if (f.classList.contains('open')) renderTemplates();
+}
+
+async function addProvider() {
+  const name = document.getElementById('np-name').value.trim();
+  const url = document.getElementById('np-url').value.trim();
+  const env = document.getElementById('np-env').value.trim();
+  const model = document.getElementById('np-model').value.trim();
+  const note = document.getElementById('np-note').value.trim();
+  const msg = document.getElementById('np-msg');
+  if (!name || !url) { msg.textContent = 'Name and URL are required.'; msg.style.color = 'var(--red)'; return; }
+  try {
+    const cfg = _providersCache || await getConfig();
+    cfg.providers = cfg.providers || {};
+    cfg.providers[name] = {
+      enabled: true, label: name,
+      api_base: url,
+      ...(env ? { api_key_env: env } : {}),
+      ...(model ? { default_model: model } : {}),
+      ...(note ? { note } : {}),
+      catalog_cache_seconds: 300,
+    };
+    await putConfig(cfg);
+    toast('Provider added ✓');
+    document.getElementById('new-prov-form').classList.remove('open');
+    ['np-name','np-url','np-env','np-model','np-note'].forEach(i => document.getElementById(i).value = '');
+    loadProviders();
+  } catch(e) { msg.textContent = String(e); msg.style.color = 'var(--red)'; }
+}
+
+async function removeProvider(key) {
+  if (!confirm(`Remove provider "${key}"?`)) return;
+  try {
+    const cfg = _providersCache || await getConfig();
+    delete cfg.providers[key];
+    await putConfig(cfg);
+    toast('Provider removed');
+    loadProviders();
+  } catch(e) { toast(String(e), 'err'); }
+}
+
+// ── WEIGHTS PAGE ──────────────────────────────────────────────────────────────
+const COMP_LABELS = {
+  speed:'Speed', capability_chat:'Chat capability', capability_coding:'Coding capability',
+  capability_thinking:'Thinking capability', capability_avg:'Avg capability',
+  context:'Context window', multimodal:'Multimodal', tool_use:'Tool use',
+  mem_fit:'Memory fit', params_quality:'Param quality',
+  cost_efficiency:'Cost efficiency', value:'Value/dollar',
+  privacy:'Privacy', reliability:'Reliability 🆕',
+};
+
+let _weightsCache = null;
+async function loadWeights() {
+  try {
+    const cfg = await getConfig();
+    _weightsCache = cfg;
+    renderWeights(cfg);
+  } catch(e) { document.getElementById('weights-form').innerHTML = `<p class="hint" style="color:var(--red)">${e}</p>`; }
+}
+
+function renderWeights(cfg) {
+  const uc = cfg.use_cases || {};
+  document.getElementById('weights-form').innerHTML = Object.entries(uc).map(([name, uccfg]) => {
+    const weights = uccfg.weights || {};
+    const rows = Object.entries(weights).map(([k, v]) => {
+      const pct = Math.round(v * 100);
+      return `<div style="margin-bottom:8px">
+        <div class="row">
+          <label style="margin:0;flex:1">${COMP_LABELS[k] || k}</label>
+          <span id="w-val-${name}-${k}" style="font-size:12px;color:var(--accent);min-width:30px;text-align:right">${pct}%</span>
+        </div>
+        <input type="range" min="0" max="60" value="${pct}"
+          oninput="document.getElementById('w-val-${name}-${k}').textContent=this.value+'%'"
+          data-uc="${name}" data-key="${k}" style="margin-top:4px">
+      </div>`;
+    }).join('');
+    return `<div class="card" style="margin-bottom:16px">
+      <div class="card-head"><span class="provider-tag">${name}</span><span class="card-head name">${uccfg.label || name}</span></div>
+      ${rows}
+    </div>`;
+  }).join('');
+}
+
+async function saveWeights() {
+  try {
+    const cfg = _weightsCache || await getConfig();
+    document.querySelectorAll('input[type=range][data-uc]').forEach(el => {
+      const uc = el.dataset.uc; const k = el.dataset.key;
+      cfg.use_cases[uc].weights[k] = parseInt(el.value) / 100;
+    });
+    // renormalise each use-case so weights sum to 1
+    Object.values(cfg.use_cases).forEach(uc => {
+      const w = uc.weights; const tot = Object.values(w).reduce((a,b)=>a+b,0);
+      if (tot > 0) Object.keys(w).forEach(k => w[k] = Math.round(w[k] / tot * 10000) / 10000);
+    });
+    await putConfig(cfg);
+    toast('Weights saved ✓');
+  } catch(e) { toast(String(e), 'err'); }
+}
+
+// ── JSON EDITOR ───────────────────────────────────────────────────────────────
+async function refreshJson() {
+  try {
+    const cfg = await getConfig();
+    document.getElementById('json-raw').value = JSON.stringify(cfg, null, 2);
+  } catch(e) { document.getElementById('json-raw').value = `// Error loading config: ${e}`; }
+}
+
+async function saveJson() {
+  const raw = document.getElementById('json-raw').value;
+  try {
+    const cfg = JSON.parse(raw);
+    await putConfig(cfg);
+    toast('Config saved ✓');
+  } catch(e) { toast('Parse error: ' + e.message, 'err'); }
+}
+
+// ── BOOT ──────────────────────────────────────────────────────────────────────
+checkHealth();
+setInterval(checkHealth, 15000);
+loadRoutes();
+</script>
+</body>
+</html>

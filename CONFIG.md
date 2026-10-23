@@ -129,7 +129,34 @@ free). With a key, prompts are classified by the decision model and the
 calibrated probabilities are blended across use-case rankings;
 `classify_task` never raises — provider failure falls back to local.
 
-## Learning bounds
+## Reliability scoring
+
+```json
+"routing": {
+  "reliability_floor": 0.5,
+  "reliability_min_samples": 5
+}
+```
+
+Every routed request is logged with its status code. `mrouter/reliability.py`
+turns that log into a per-model score (0–100) using exponential time-decay
+(48 h half-life, so fresh failures matter more than stale ones) shrunk toward
+an 85-point neutral prior (3 pseudo-samples — new models aren't penalised until
+their track record is real).
+
+- **`reliability_floor`**: models whose observed success-rate falls below this
+  threshold AND have at least `reliability_min_samples` are excluded from the
+  eligible pool before scoring. Default 0.5 (50 %); 0.0 disables floor-exclusion.
+- **`reliability_min_samples`**: minimum logged requests before floor-exclusion
+  can fire. Default 5 — avoids excluding a model on one bad request.
+- Unobserved models (no log entries) score the neutral prior (85) — trusted
+  until proven flaky.
+- `mrouter reliability` CLI prints the current per-model table with flags.
+
+Reliability feeds `routing.reliability` weight in each use case (default 8 %
+of the composite score). Tune the weight like any other component.
+
+
 
 ```json
 "learning": {
