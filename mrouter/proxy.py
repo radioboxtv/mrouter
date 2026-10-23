@@ -372,11 +372,23 @@ class Handler(BaseHTTPRequestHandler):
 
         if stream:
             self.send_response(resp.status)
-            for k in ("Content-Type", "Transfer-Encoding"):
-                if k in resp.headers:
-                    self.send_header(k, resp.headers[k])
+            # NOTE: do not relay the upstream's `Transfer-Encoding: chunked` header.
+            # urllib already de-chunks the upstream response before resp.read()
+            # returns bytes (http.client strips chunk framing internally), so the
+            # bytes written below are a plain stream, not valid chunk-encoded
+            # data. Declaring chunked framing while writing plain bytes is a
+            # protocol violation that curl/urllib tolerate but strict HTTP/1.1
+            # clients (Node's undici/fetch, used by Hermes and others) correctly
+            # reject with "Invalid character in chunk size". BaseHTTPRequestHandler
+            # defaults to HTTP/1.0 anyway, which has no notion of chunked transfer
+            # at all — the only valid framing here is "no Content-Length, body
+            # ends at connection close", so we send Content-Type only and let
+            # end-of-response close the connection.
+            if "Content-Type" in resp.headers:
+                self.send_header("Content-Type", resp.headers["Content-Type"])
             for k, v in extra.items():
                 self.send_header(k, v)
+            self.close_connection = True
             self.end_headers()
             ttft = None
             usage = None
